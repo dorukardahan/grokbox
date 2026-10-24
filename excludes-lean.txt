@@ -1,0 +1,8 @@
+# Applied when BACKUP_PROFILE=lean (e.g. to fit a 15 GB free Google account): large, re-creatable
+# data. Review before enabling; add project specifics via EXTRA_EXCLUDES in config.env.
+**/node_modules
+/home/box/.cache
+/home/box/.npm
+/home/box/.local/share/uv
+**/.venv
+**/.tox

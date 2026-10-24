@@ -1,0 +1,12 @@
+# Never commit anything that holds secrets or machine state
+config.env
+secrets/
+state/
+logs/
+staging/
+cache/
+bin/
+*.bak-*
+.tests-tmp/
+__pycache__/
+*.pyc
