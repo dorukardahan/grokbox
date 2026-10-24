@@ -87,34 +87,51 @@ If the dry run or backup exits with 4, the stale guard tripped: see rule 3. On e
 ```
 The scheduler is a background process: it **dies on a box move** (and with it all backups). That is what step 8 fixes.
 
-### 8. ONE daily routine: health watchdog + server-side export (do this yourself)
+### 8. Create the two Grok Box bots: GrokBox-Main and GrokBox-Assist (do this yourself)
 A box backup alone misses what lives only on the Grok Bot servers: every bot's full conversation history
-and the bot's memory. You can read them with your own tools `ReadTranscript` and `RecallMemory`. These are
-**bot tools**: no script, cron or `scheduler.sh` can call them. Never use cookies, scraped tokens or internal
-APIs instead. So the export runs inside the same daily routine that keeps the scheduler alive. There is
-**one** routine and no separate system.
+and the bots' memory. They can only be read with the Grok Bot tools `ReadTranscript` and `RecallMemory`.
+These are **bot tools**: no script, cron or `scheduler.sh` can call them, and you must never use cookies,
+scraped tokens or internal APIs instead. So all ongoing backup work is done by **two dedicated bots**, each
+with its own daily routine. **You (the primary bot) keep no backup routine.** Delete or disable any older
+Grok Box / watchdog routine of yours once both bots are running. Read [docs/bots.md](docs/bots.md) first.
 
-1. Open [docs/routine-template.md](docs/routine-template.md). Fill in the placeholders: `<REPO>` (this repo's
-   path), `<DRIVE_ACCOUNT>`, `<REMOTE>` (`GB_REMOTE:GB_FOLDER` from config.env), `<AGENTS_DIR>` (normally
-   `/home/box/agent-data/agents`), `<LANGUAGE>` (the user's language) and `<HOUR>`.
-2. **Create the routine yourself** with your `UpdateRoutine` tool: daily, at that hour in the user's time
-   zone, with the filled-in prompt. The user does not need to do anything. If a Grok Box routine already
-   exists, update it instead of adding a second one.
-3. **Run the first full export now**, right after setup, by doing Part B of the prompt yourself once. It
-   pages back through every conversation, so expect many rounds of `ReadTranscript` + `server-export-merge.py
-   ingest`, until `next` prints `{}`. Then run the memory step. Never print or summarize message content.
-4. Check `staging/server-export/INDEX.md`: every row should be `complete`, `empty` or `not readable`. Then
-   run `./backup.sh` (or wait for the next hourly) so the export is in a snapshot.
+- **GrokBox-Main** does all backup work. Box side: `install.sh --schedule`, `status.sh`, alerts, Drive
+  re-consent. Server side: it exports every bot's conversation and the memory.
+- **GrokBox-Assist** exports Main's own conversation and your main chat. A bot cannot export the
+  conversation it is running in. Assist also checks that Main's run happened, and covers for Main if it
+  missed one. Each bot exports the other, so both see each other's work.
 
-The routine reports to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale guard,
-or export gaps. `install.sh --schedule` is idempotent: it restarts the scheduler after a box move and does
-nothing otherwise. Details: [docs/server-export.md](docs/server-export.md).
+Steps:
+1. **Create both bots** with your `CreateAgent` tool: names `GrokBox-Main` and `GrokBox-Assist`. Use the
+   personas in [docs/bots.md](docs/bots.md), with `<REPO>`, `<LANGUAGE>`, `<MAIN_ID>` and `<PRIMARY_ID>`
+   filled in. `<PRIMARY_ID>` is your own agent id; create Main first so that you know `<MAIN_ID>`. Note both
+   new ids. If bots with these names already exist, reuse them instead of creating duplicates.
+2. **Pick staggered times** in the user's time zone, for example Main 05:15 and Assist 09:00. Keep them
+   away from `check.sh` (04:40 by default) and at least 2 hours apart.
+3. **Brief each bot** with your `SendToAgent` tool, using the setup briefs in [docs/bots.md](docs/bots.md),
+   filled in. Each bot then:
+   - reads its template ([docs/routine-main.md](docs/routine-main.md) or [docs/routine-assist.md](docs/routine-assist.md));
+   - **creates its own daily routine with its `UpdateRoutine` tool**;
+   - **runs the first full export right away**. Main exports all bots except itself; Assist exports Main
+     and your main chat.
+   They reply with a short status. Do not paste conversation content anywhere.
+4. **Your own memory:** the two bots cannot read your private memory. Keep durable facts in the user's
+   shared memory, and export your private memory once now. Run a few `RecallMemory` queries with
+   `write_to_file: true`, then:
+   `python3 server-export-merge.py memory --remove --out primary-bot-private --label "primary bot" <files>`.
+5. **Check** `staging/server-export/INDEX.md`. Every row should be `complete`, `empty` or `not readable`,
+   and Main, Assist and your own id must be present. Then run `./backup.sh` (or wait for the next hourly)
+   so the export is in a snapshot.
+
+Both routines report to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale
+guard, export gaps, or a missed partner run. Details: [docs/server-export.md](docs/server-export.md).
 
 ### 9. Finish
 Tell the user, briefly: what is backed up, the schedule, where the repo is (`Drive: GrokBox/restic`), and remind them
 about the three things they must keep outside the box: the restic password, the OAuth client JSON, and their Google
-account access. Say that every bot's server-side conversation history and the bot's memory are exported daily by the routine.
-Mention what still cannot be backed up (README "Limits": the bot's own main chat, other bots' private memory, connector grants, app-managed secrets).
+account access. Say that GrokBox-Main and GrokBox-Assist now run the backups every day (box health + every bot's server-side
+conversation history and the shared memory), and that they only report problems.
+Mention what still cannot be backed up (README "Limits": bots' private memory other than the two Grok Box bots', Pages, connector grants, app-managed secrets).
 
 ## Day-to-day commands
 | need | command |

@@ -220,6 +220,15 @@ printf 'Top 50 matches for "a" in your memory (3 total):\n- (2026-01-01) [profil
 printf 'Top 50 matches for "b" in your memory (3 total):\n- (2026-01-01) [profile] fact one\n- (2026-01-03) [journal] fact three\n' > "$FX/m2.txt"
 sem memory "$FX/m1.txt" "$FX/m2.txt" >/dev/null; sem memory "$FX/m1.txt" >/dev/null
 check "memory facts de-duplicated (3 unique, wrapped line joined)" test "$(grep -c '^- (' "$SE/memory/primary-bot-and-shared.md")" = 3 -a "$(grep -c 'fact two wrapped' "$SE/memory/primary-bot-and-shared.md")" = 1
+sem memory --out grokbox-main-and-shared --label GrokBox-Main "$FX/m2.txt" >/dev/null
+check "memory --out writes its own file with its label" grep -q 'GrokBox-Main' "$SE/memory/grokbox-main-and-shared.md"
+check "age: a just-exported id passes" bash -c "SERVER_EXPORT_DIR='$SE' python3 '$REPO_DIR/server-export-merge.py' age tid-1 >/dev/null"
+check "age: an id never exported fails (missed run)" bash -c "! SERVER_EXPORT_DIR='$SE' python3 '$REPO_DIR/server-export-merge.py' age tid-1 tid-missing >/dev/null"
+tf=$(ls "$SE"/transcripts/tid-1__*.jsonl); head -n 9 "$tf" > "$SE/transcripts/tid-1__old-name.jsonl"; tail -n 7 "$tf" > "$tf.n"; mv "$tf.n" "$tf"
+touch -d '2 days ago' "$SE/transcripts/tid-1__old-name.jsonl"; chmod 600 "$SE"/transcripts/*
+sem repair >/dev/null
+check "repair merges a renamed bot's split history into one file" test "$(ls "$SE"/transcripts/tid-1__*.jsonl | wc -l)" = 1 -a "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12"
+check "repair keeps the originals in state/replaced/" test "$(find "$SE/state/replaced" -name 'tid-1__*' | wc -l)" = 2
 check "export dirs are 700, files 600" test -z "$(find "$SE" -type d ! -perm 700; find "$SE" -type f ! -perm 600)"
 
 echo; echo "smoke test: $PASS_N passed, $FAIL_N failed"

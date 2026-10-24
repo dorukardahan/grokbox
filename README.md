@@ -26,11 +26,29 @@ flowchart LR
   P --> R[restic backup<br/>encrypts + dedups]
   G -->|tripped| A[state/ALERT, nothing uploaded]
   R -->|rclone| D[(Your Google Drive<br/>GrokBox/restic)]
-  Wd[daily bot routine:<br/>install.sh --schedule] -.restarts after box move.-> S
+  Wd[GrokBox-Main daily routine:<br/>install.sh --schedule] -.restarts after box move.-> S
   H[human] -->|status.sh, restore.sh| D
 ```
-Background processes die when the box is moved, so a **daily bot routine** runs `install.sh --schedule` (idempotent)
-and `status.sh --local`; it bothers you only when `Overall` is not `OK`.
+Background processes die when the box is moved, so the **GrokBox-Main** bot's daily routine runs `install.sh --schedule`
+(idempotent) and `status.sh --local`; it bothers you only when `Overall` is not `OK`.
+
+## Architecture: two backup bots
+Some data lives only on the Grok Bot servers: every bot's conversation history and the bots' memory.
+Only a bot's own tools (`ReadTranscript`, `RecallMemory`) can read it, and a bot cannot export the
+conversation it is running in. So your bot creates **two dedicated bots** that do all the backup work and
+export each other ([docs/bots.md](docs/bots.md)). Your main bot keeps no backup routine.
+```mermaid
+flowchart TB
+  P[your primary bot] -->|setup: CreateAgent + SendToAgent| M & A
+  M[GrokBox-Main<br/>daily, e.g. 05:15] -->|install.sh --schedule, status.sh, alerts| BOX[box backup<br/>scheduler + restic]
+  M -->|ReadTranscript: every bot except itself<br/>RecallMemory| X[staging/server-export/<br/>transcripts + memory + INDEX.md]
+  A[GrokBox-Assist<br/>daily, e.g. 09:00] -->|ReadTranscript: GrokBox-Main<br/>+ primary main chat| X
+  A -.checks Main ran, covers a missed run.-> M
+  M -.checks Assist ran.-> A
+  X --> BOX
+  BOX -->|hourly, encrypted| D[(Your Google Drive)]
+```
+Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md](docs/routine-assist.md).
 
 ## Schedule (times in `TZ`, default UTC; all configurable in `config.env`)
 | when | what | tag | retention |
@@ -84,12 +102,15 @@ cd /workspace/grokbox
 ## Limits: what a box backup cannot contain
 Data that lives only on the platform's servers or in the app cannot be read from inside the box, so it is **not** backed up:
 - the authoritative server-side copies of routines/automations (the box holds a synced local copy, which is what gets backed up).
-  Every bot's server-side **conversation history and the bot's memory ARE backed up**: the one daily bot routine
-  ([docs/routine-template.md](docs/routine-template.md)) pulls them into `staging/server-export/` ([docs/server-export.md](docs/server-export.md)).
-  Still out of reach: the bot's own main chat, its subagent runs, and other bots' private memory;
+  Every bot's server-side **conversation history and the shared memory ARE backed up** by the two Grok Box bots
+  (see Architecture) into `staging/server-export/` ([docs/server-export.md](docs/server-export.md)), including the primary
+  bot's main chat and each other's conversations. Still out of reach: subagent runs; the private memory of bots other than
+  the two Grok Box bots (`RecallMemory` only sees the caller's own + shared memory; the primary bot dumps its own once at
+  setup, so keep durable facts in shared memory; other bots' on-box memory files are in the brain export);
+  bots the server does not let them read (listed as `not readable`);
 - connector/plugin OAuth grants (mail, drive, chat apps...);
 - app-managed secrets and environment variables (re-add them in the app; keep `RESTIC_BACKUP_PASSWORD` in a password manager too);
-- billing and usage settings, pages/canvases;
+- billing and usage settings; pages/canvases (`ListCanvases` only shows a bot's own Pages);
 - agent stores that are not mounted on this box.
 
 You must also keep **outside the box**: the restic password, the Google OAuth client JSON, and access to your Google account.
@@ -100,9 +121,9 @@ You must also keep **outside the box**: the restic password, the Google OAuth cl
 3. Google OAuth client: [docs/google-cloud-setup.md](docs/google-cloud-setup.md) -> `secrets/gdrive-oauth-client.json`; `./auth-gdrive.sh` (one consent click).
    Fallback: `./auth-gdrive.sh --rclone-default-client` (shared, rate-limited client; see [docs/migrate-client.md](docs/migrate-client.md)).
 4. `./install.sh --init`, `./backup.sh --dry-run`, `./backup.sh`, `./install.sh --schedule`, `./status.sh`.
-5. One daily bot routine, created by the bot itself from [docs/routine-template.md](docs/routine-template.md): health check
-   (`./install.sh --schedule`, `./status.sh`) + incremental server-side export of all bots' conversations and memory; it reports only problems.
-   The first full export runs once right after setup.
+5. Your bot creates **GrokBox-Main** and **GrokBox-Assist** ([docs/bots.md](docs/bots.md)) and briefs them. Each creates its own daily
+   routine ([docs/routine-main.md](docs/routine-main.md): health + export of all bots; [docs/routine-assist.md](docs/routine-assist.md):
+   export Main + primary chat, watch Main) and runs the first full export. They report only problems.
 
 ## Test
 `tests/smoke.sh` runs the whole flow in a temp dir against a local restic repo (no Google Drive needed): install, init, backups, restore with checksum verification,
@@ -125,11 +146,13 @@ stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), stat
 | `manifest.py` | file count / bytes / newest mtime for the guard |
 | `sqlite-snapshot.py` | consistent copies of live SQLite databases |
 | `brain-export.py` | agent data/store discovery, mirror of stores outside the roots, `INDEX.md` |
-| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/` ([docs/server-export.md](docs/server-export.md)) |
+| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/`; `age` (did a routine run?), `repair` (renamed-bot split files) ([docs/server-export.md](docs/server-export.md)) |
 | `rebuild-kit/inventory.sh` | records installed tools and venv freezes into `state/rebuild-kit/` |
 | `excludes.txt`, `excludes-secrets.txt`, `excludes-lean.txt` | always / only if `BACKUP_SECRETS=0` / only if `BACKUP_PROFILE=lean` |
 | `docs/google-cloud-setup.md` | exact Google Cloud steps for the OAuth client |
-| `docs/routine-template.md` | ready-to-paste daily routine prompt (health + server export), with placeholders |
+| `docs/bots.md` | the two backup bots: why, personas, setup briefs for `CreateAgent` / `SendToAgent` |
+| `docs/routine-main.md` | GrokBox-Main daily routine prompt (health + export of all bots), with placeholders |
+| `docs/routine-assist.md` | GrokBox-Assist daily routine prompt (export Main + primary chat, watch Main) |
 | `docs/server-export.md` | daily routine that pulls every bot's server-side conversation + memory into the backup |
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |

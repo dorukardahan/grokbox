@@ -1,15 +1,20 @@
 #!/usr/bin/env python3
 """Merge ReadTranscript (write_to_file) chunk files into staging/server-export/.
 
-ReadTranscript is a Grok Bot tool, not callable from cron, so the primary bot's daily routine
-pulls the pages (in=<id>, limit=200, write_to_file=true, paging back with `before`) and runs:
+ReadTranscript is a Grok Bot tool, not callable from cron, so a bot's daily routine (GrokBox-Main, and
+GrokBox-Assist for Main's own conversation) pulls the pages (in=<id>, limit=200, write_to_file=true, paging back with `before`) and runs:
 
   server-export-merge.py ingest [--remove] CHUNK...   merge chunks (idempotent; re-ingest is a no-op)
   server-export-merge.py next                         what to call next (JSON): per transcript the
                                                      `before` value still needed, or "newest"; {} = all complete
   server-export-merge.py index                        rewrite INDEX.md
-  server-export-merge.py memory [--remove] CHUNK...   merge RecallMemory (write_to_file) results into
-                                                     memory/primary-bot-and-shared.md (deduped, kept forever)
+  server-export-merge.py age [--max-hours 26] [ID...] hours since each id was last checked (JSON);
+                                                     exit 1 if one is missing or older (did the routine run?)
+  server-export-merge.py repair                       merge an id's history split over several files
+                                                     (left by a bot rename in older versions); keeps originals
+  server-export-merge.py memory [--remove] [--out NAME] [--label WHO] CHUNK...
+                                                     merge RecallMemory (write_to_file) results into
+                                                     memory/<NAME>.md (default primary-bot-and-shared; deduped, kept forever)
 
 Layout (dir 700, files 600):
   transcripts/<id>__<slug>.jsonl   oldest first, one message per line
@@ -19,7 +24,7 @@ Pages are stitched by the header range "positions A–B of N". A page that overl
 exported (the incremental case: newest page) is de-duplicated by matching the longest suffix of the
 exported file against the page's head (positions and lines are not 1:1: tool results can share a slot).
 """
-import json, os, re, sys, time, unicodedata, glob, shutil
+import datetime, json, os, re, sys, time, unicodedata, glob, shutil
 
 BASE = os.environ.get('SERVER_EXPORT_DIR',
                       os.path.join(os.path.dirname(os.path.abspath(__file__)), 'staging', 'server-export'))
@@ -94,7 +99,56 @@ def profile_name(tid):
 
 
 def tfile(rec, tid):
-    return os.path.join(TDIR, f"{tid}__{slug(rec.get('name') or tid)}.jsonl")
+    """Path of a transcript file. The slug follows the bot's current name; when a bot is renamed, the
+    existing file is renamed too (one file per id), so history is never split across two files."""
+    want = os.path.join(TDIR, f"{tid}__{slug(rec.get('name') or tid)}.jsonl")
+    have = sorted(glob.glob(os.path.join(TDIR, f"{tid}__*.jsonl")), key=os.path.getmtime)
+    if len(have) > 1:
+        repair_split(tid, have)
+        have = sorted(glob.glob(os.path.join(TDIR, f"{tid}__*.jsonl")), key=os.path.getmtime)
+    if have and have[0] != want:
+        os.replace(have[0], want)
+    return want
+
+
+def _overlap(old, new):
+    """Largest k with old[-k:] == new[:k], compared as canonical JSON."""
+    co, cn = [canon(l) for l in old[-(len(new) + 5):]], [canon(l) for l in new]
+    for k in range(min(len(co), len(cn)), 0, -1):
+        if co[-k:] == cn[:k]: return k
+    return 0
+
+
+def repair_split(tid, files):
+    """Merge several files of one id (left by a rename in older versions) oldest first, dropping the
+    overlap between consecutive files. The originals are kept in state/replaced/<time>/."""
+    merged = []
+    for f in files:
+        new = [l for l in open(f, encoding='utf-8').read().split('\n') if l]
+        merged += new[_overlap(merged, new):] if merged else new
+    keep = os.path.join(SDIR, 'replaced', time.strftime('%Y%m%d-%H%M%S'))
+    os.makedirs(keep, mode=0o700, exist_ok=True)
+    for f in files: shutil.copy2(f, keep)
+    tmp = files[-1] + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as fh:
+        for l in merged: fh.write(l + '\n')
+    os.chmod(tmp, 0o600); os.replace(tmp, files[-1])
+    for f in files[:-1]: os.remove(f)
+    print(f"repaired {tid}: {len(files)} files -> 1 ({len(merged)} lines); originals in {keep}", file=sys.stderr)
+    return len(merged)
+
+
+def repair(pos):
+    """Fix ids whose history is split over several files; correct their line counts."""
+    for tid, rec in pos.items():
+        have = sorted(glob.glob(os.path.join(TDIR, f"{tid}__*.jsonl")), key=os.path.getmtime)
+        if len(have) > 1:
+            n = repair_split(tid, have)
+            rec['lines'] = n
+            rec['warnings'] = [w for w in rec.get('warnings', []) if 'matched no lines' not in w]
+            rec.setdefault('notes', []).append(
+                f"{time.strftime('%F %T%z')}: repaired split history ({len(have)} files merged, overlap removed)")
+            tfile(rec, tid)
 
 
 def stitch(pos, tid):
@@ -120,11 +174,8 @@ def stitch(pos, tid):
                 tail = []
                 if os.path.exists(path):
                     with open(path, encoding='utf-8') as fh:
-                        tail = [canon(l) for l in fh.read().split('\n')[-(len(new) + 5):] if l]
-                cn = [canon(l) for l in new]
-                k = 0
-                for kk in range(min(len(tail), len(cn)), 0, -1):
-                    if tail[-kk:] == cn[:kk]: k = kk; break
+                        tail = [l for l in fh.read().split('\n')[-(len(new) + 5):] if l]
+                k = _overlap(tail, new)
                 if k == 0:
                     rec.setdefault('warnings', []).append(
                         f"{time.strftime('%F %T%z')}: overlap {a}-{M} matched no lines; appended page whole")
@@ -181,11 +232,24 @@ def next_calls(pos):
     return out
 
 
+def age(pos, ids, max_h):
+    """Hours since each id was last checked; exit 1 if one is missing or older than max_h."""
+    now, out, bad = time.time(), {}, False
+    for tid in ids or sorted(pos):
+        c = (pos.get(tid) or {}).get('checked')
+        h = None if not c else round((now - datetime.datetime.strptime(c, '%Y-%m-%d %H:%M:%S%z').timestamp()) / 3600, 1)
+        out[tid] = h
+        bad |= h is None or h > max_h
+    print(json.dumps(out, indent=1))
+    return 1 if bad else 0
+
+
 def write_index(pos):
     rows = sorted(pos.items(), key=lambda kv: (kv[1].get('name') or '').lower())
     with open(os.path.join(BASE, 'INDEX.md'), 'w', encoding='utf-8') as f:
         f.write(f"# Server-side transcript export — {time.strftime('%F %H:%M %z')}\n\n"
-                "Pulled with ReadTranscript by the primary bot's daily routine and merged by server-export-merge.py.\n\n"
+                "Pulled with ReadTranscript by the GrokBox-Main daily routine (GrokBox-Assist exports Main's own conversation)\n"
+                "and merged by server-export-merge.py.\n\n"
                 "| bot / conversation | id | server messages | exported up to | lines | last export | status |\n|---|---|---|---|---|---|---|\n")
         for tid, r in rows:
             st = 'complete' if r.get('max_pos', -1) >= r.get('total', 0) - 1 and not r.get('pending') else \
@@ -197,9 +261,9 @@ def write_index(pos):
     os.chmod(os.path.join(BASE, 'INDEX.md'), 0o600)
 
 
-def memory(paths, remove=False):
+def memory(paths, remove=False, out_name='primary-bot-and-shared', label='primary bot'):
     mdir = os.path.join(BASE, 'memory'); os.makedirs(mdir, mode=0o700, exist_ok=True)
-    out = os.path.join(mdir, 'primary-bot-and-shared.md')
+    out = os.path.join(mdir, slug(out_name) + '.md')
     facts = set()
     if os.path.exists(out):
         facts = {l.rstrip('\n') for l in open(out, encoding='utf-8') if l.startswith('- (')}
@@ -221,9 +285,10 @@ def memory(paths, remove=False):
         if cur: facts.add(cur)
         if remove: os.remove(p)
     with open(out, 'w', encoding='utf-8') as f:
-        f.write(f"# Memory export (RecallMemory: primary bot + owner's shared memory) — updated {time.strftime('%F %H:%M %z')}\n\n"
+        f.write(f"# Memory export (RecallMemory: {label} + owner's shared memory) — updated {time.strftime('%F %H:%M %z')}\n\n"
                 "Collected with many RecallMemory queries (each returns at most ~15 facts), deduplicated, never pruned.\n"
-                "Other bots' private memory is NOT reachable from the primary bot; their on-box memory files are in staging/brain.\n\n")
+                "RecallMemory only returns the calling bot's own memory and the owner's shared memory; other bots'\n"
+                "on-box memory files (agents/<id>/memory/) are in the brain export.\n\n")
         for l in sorted(facts): f.write(l + '\n')
     os.chmod(out, 0o600)
     print(json.dumps({'facts': len(facts), 'new': len(facts) - before, 'query_totals': totals}, ensure_ascii=False))
@@ -231,8 +296,11 @@ def memory(paths, remove=False):
 
 if __name__ == '__main__':
     a = sys.argv[1:]
-    if not a or a[0] not in ('ingest', 'next', 'index', 'memory'):
+    if not a or a[0] not in ('ingest', 'next', 'index', 'memory', 'repair', 'age'):
         print(__doc__); sys.exit(2)
+    import fcntl   # two bots may run this at the same time: one writer at a time
+    os.makedirs(SDIR, mode=0o700, exist_ok=True)
+    _lock = open(os.path.join(SDIR, '.lock'), 'w'); fcntl.flock(_lock, fcntl.LOCK_EX)
     if a[0] == 'ingest':
         rm = '--remove' in a; a = [x for x in a[1:] if x != '--remove']
         fid = None
@@ -240,7 +308,19 @@ if __name__ == '__main__':
             i = a.index('--id'); fid = a[i + 1]; del a[i:i + 2]
         ingest(a, rm, fid)
     elif a[0] == 'memory':
-        memory([x for x in a[1:] if x != '--remove'], '--remove' in a)
+        rm = '--remove' in a; a = [x for x in a[1:] if x != '--remove']
+        kw = {}
+        for opt, key in (('--out', 'out_name'), ('--label', 'label')):
+            if opt in a:
+                i = a.index(opt); kw[key] = a[i + 1]; del a[i:i + 2]
+        memory(a, rm, **kw)
+    elif a[0] == 'repair':
+        pos = load_pos(); repair(pos); save_pos(pos); write_index(pos)
+    elif a[0] == 'age':
+        a = a[1:]; mh = 26.0
+        if '--max-hours' in a:
+            i = a.index('--max-hours'); mh = float(a[i + 1]); del a[i:i + 2]
+        sys.exit(age(load_pos(), a, mh))
     elif a[0] == 'next':
         print(json.dumps(next_calls(load_pos()), ensure_ascii=False, indent=1))
     else:
