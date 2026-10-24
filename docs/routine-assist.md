@@ -38,19 +38,23 @@ do not change other bots' settings, routines or memory.
    then: python3 <REPO>/server-export-merge.py memory --remove --out grokbox-assist-and-shared --label GrokBox-Assist <files>
    If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
    VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
-   cat > /workspace/agent-tools/mem-1.txt <<'EOF'
+   cat > /workspace/agent-tools/grokbox-assist-mem-1.txt <<'GROKBOX_MEM_END_7Q2'
    <the RecallMemory result, unchanged>
-   EOF
-   and pass those files instead. Never edit, summarize or add facts.
-3. Did Main run today? Run: python3 <REPO>/server-export-merge.py age --max-hours 30 <ASSIST_ID>
-   (Main exports this bot every run, so this is the age of Main's last export), and also
-   cd <REPO> && ./status.sh --local
-   - Exit 1 from age (Main's export is older than 30 h): Main missed its run. Do Main's routine yourself
+   GROKBOX_MEM_END_7Q2
+   (numbered -1, -2, ...; the odd end marker cannot appear inside a result) and pass those files instead.
+   Never edit, summarize or add facts.
+3. Scheduler self-heal + health, EVERY run (not only when Main missed its run):
+   cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat state/ALERT 2>/dev/null
+   (install.sh --schedule is a no-op when the scheduler runs; after a box move it starts it again.)
+   Then: did Main run today? python3 <REPO>/server-export-merge.py age --max-hours 26 <ASSIST_ID>
+   (Main exports this bot every run, so this is the age of Main's last export).
+   - Exit 1 from age (Main's export is older than 26 h): Main missed its run. Do Main's routine yourself
      (<REPO>/docs/routine-main.md, Part A and Part B, with your own id <ASSIST_ID> in place of the skipped
      id, so you export everything except yourself) and report "GrokBox-Main did not run; GrokBox-Assist
      covered it".
-   - status.sh not "Overall: OK": report the "!!" lines (Main should already have reported them; say so
-     only if Main's run is older than 30 h, or if the problem is new since Main's run).
+   - schedule_rc not 0, status.sh not "Overall: OK", or any line after "--- open alerts:": report the
+     "!!" lines and every open alert line (this chat report is the alert channel). If Main already
+     reported the same problem in its run today, say so in one line instead of repeating details.
 4. Read <REPO>/staging/server-export/INDEX.md and report rows with "gap" or warnings.
 
 Report format, only when something needs attention: one short list with the exact next step.

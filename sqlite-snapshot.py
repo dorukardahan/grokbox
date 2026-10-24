@@ -9,7 +9,9 @@ copy triggers a new copy next run.
 LIST_FILE receives (atomically, at the end) only the absolute source paths whose copy is fresh
 (lib.sh excludes exactly those live files from the restic run). Exit status is 1 if any database
 failed, 0 otherwise (the list is still written). Staged copies whose source vanished are removed, but only when the source's
-directory still exists (a temporarily unmounted store never wipes its copies). Missing paths are fine."""
+directory still exists (a temporarily unmounted store never wipes its copies). Missing paths are fine.
+Sources are resolved with realpath, so a database reached through a symlinked directory (two globs
+naming the same tree) is staged once, under its real path; copies left under an alias path are removed."""
 import glob, json, os, sqlite3, sys
 
 staging, listfile, globs = sys.argv[1], sys.argv[2], sys.argv[3:]
@@ -19,7 +21,7 @@ sources = set()
 for g in globs:
     for src in glob.glob(g, recursive=True):
         if os.path.isfile(src) and not os.path.islink(src):
-            sources.add(os.path.abspath(src))
+            sources.add(os.path.realpath(src))
 
 
 def identity(p):
@@ -81,7 +83,10 @@ for dp, _dn, fn in os.walk(base):
         if f.endswith('.tmp'):
             continue
         src = '/' + os.path.relpath(dst, base)
-        if src not in sources and not os.path.exists(src) and os.path.isdir(os.path.dirname(src)):
+        if src in sources:
+            continue
+        alias = os.path.exists(src) and os.path.realpath(src) != src   # same DB, staged under its real path
+        if alias or (not os.path.exists(src) and os.path.isdir(os.path.dirname(src))):
             os.remove(dst)
 for path, data in ((idfile, json.dumps(ids)), (listfile, ''.join(p + '\n' for p in staged))):
     tmp = path + '.tmp'

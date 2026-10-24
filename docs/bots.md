@@ -44,7 +44,7 @@ conversation. Never print secrets (secrets/*, the restic password, tokens, auth 
 backup.sh --force, prune, forget or delete snapshots or Drive data without the owner's explicit OK.
 Never print or summarize other bots' conversation content. Never read the server through cookies,
 scraped tokens or internal APIs: only ReadTranscript / RecallMemory, with write_to_file: true (if RecallMemory has no
-write_to_file option, paste its result verbatim into a file with a quoted heredoc, <<'EOF').
+write_to_file option, paste its result verbatim into a file named after this bot with a quoted heredoc, <<'GROKBOX_MEM_END_7Q2').
 Do not change other bots' settings, routines or memory.
 ```
 
@@ -99,6 +99,6 @@ The primary bot's private memory can only be read by the primary bot itself. So:
   export every day;
 - at setup, and whenever the owner asks, the primary bot runs a few `RecallMemory` queries
   (`write_to_file: true`, or, if that option is missing, each inline result pasted verbatim into
-  `/workspace/agent-tools/mem-<n>.txt` with a quoted heredoc `<<'EOF'`) and then
+  `/workspace/agent-tools/primary-mem-<n>.txt` with a quoted heredoc `<<'GROKBOX_MEM_END_7Q2'`) and then
   `python3 <REPO>/server-export-merge.py memory --remove --out primary-bot-private --label "primary bot" <files>`.
   This needs no routine on the primary bot.

@@ -26,7 +26,7 @@ used your own client) and **access to your Google account**.
 1. `git clone <the Grok Box repo URL> /workspace/grokbox && cd /workspace/grokbox && cp config.env.example config.env` (use the same `GB_REMOTE`, `GB_FOLDER`, `BACKUP_HOST` as before).
 2. Put the password back: set the box secret `RESTIC_BACKUP_PASSWORD` and run `./install.sh` (creates `secrets/restic-pass`).
 3. Put the client JSON at `secrets/gdrive-oauth-client.json` and run `./auth-gdrive.sh` (a different client cannot see the old folder:
-   `drive.file` scope; with rclone's default client use `--rclone-default-client`). Check: `./restore.sh list`.
+   `drive.file` scope; with rclone's default client use `--rclone-default-client`). Check: `./auth-gdrive.sh --test`, then `./restore.sh list` (it stops with an error listing the hosts if `BACKUP_HOST` has no snapshots).
 4. Restore everything into a scratch dir and move it into place:
    `./restore.sh latest` -> `/workspace/restore-<date>-latest/` (contains `/workspace/...` and `/home/box/...`).
    Do not blanket-copy over the box. First `./restore.sh latest --missing-only` (it asks first): it only fills in files that do not exist yet.
@@ -41,6 +41,25 @@ used your own client) and **access to your Google account**.
 6. Tool inventory: `state/rebuild-kit/inventory.txt` (refreshed daily; inside the snapshot) lists installed CLIs, apt manual packages,
    npm/uv tools; `state/rebuild-kit/venvs/*.txt` are pip freezes of every venv. Venvs and model caches are in the backup by default; the
    freezes are the fallback when a restored venv does not run on a new image.
+
+## Recovery card (fill in, keep OUTSIDE the box, e.g. in your password manager)
+Without these values a brand-new box cannot find or open the backups. None of them is a secret except
+the two marked ones; never commit the filled-in card.
+
+| what | your value | where it is used |
+|---|---|---|
+| Google account that owns the Drive | `you@example.com` | `auth-gdrive.sh` consent |
+| rclone remote name (`GB_REMOTE`) | `gdrive` | `config.env` |
+| Drive folder of the repository (`GB_FOLDER`) | `GrokBox/restic` | `config.env` |
+| restic host name (`BACKUP_HOST`) | `grokbox` | `config.env`; `restore.sh --host` |
+| time zone (`TZ`) | `UTC` | `config.env` |
+| OAuth client: Google Cloud project + client name | `my-project / grokbox-desktop` | `docs/google-cloud-setup.md` |
+| OAuth client JSON file (**secret**) | stored as `<where you keep it>` | `secrets/gdrive-oauth-client.json` |
+| restic password (**secret**) | stored as `<where you keep it>` | box secret `RESTIC_BACKUP_PASSWORD` |
+| repo URL of Grok Box | `https://github.com/<you>/grokbox` | step 3.1 |
+
+Lost the host name? `./restore.sh --any-host list` shows every host in the repository.
+Check a restored login without changing anything: `./auth-gdrive.sh --test`.
 
 ## 4. Re-login checklist (not in any backup)
 - The restic password (password manager / box secret) and the OAuth client JSON (your copy outside the box).

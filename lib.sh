@@ -9,8 +9,13 @@ fi
 [[ -f "$GB_CONFIG" ]] || { echo "config file not found: $GB_CONFIG" >&2; exit 2; }
 # shellcheck source=/dev/null
 source "$GB_CONFIG"
+# defaults for settings added after a config.env was written (older configs keep working)
+: "${RESTIC_TIMEOUT:=3h}" "${RESTIC_TIMEOUT_BACKUP:=12h}" "${RESTIC_TIMEOUT_CHECK:=8h}" "${RCLONE_TIMEOUT:=300}"
+: "${LOCK_ALERT_HOURS:=13}" "${HEARTBEAT_MAX_MIN:=90}" "${PRUNE_USE_TRASH:=1}"
 export TZ
+umask 077   # state, logs, staging and restored scratch data are private by default
 mkdir -p "$GB_STATE" "$GB_LOGS" "$GB_STAGING" "$RESTIC_CACHE_DIR"
+chmod 700 "$GB_STATE" "$GB_LOGS" "$GB_STAGING" 2>/dev/null || true
 LOG="$GB_LOGS/backup-$(date +%Y-%m).log"
 ALERTS_LOG="$GB_LOGS/alerts.log"
 log()  { echo "[$(date '+%F %T %Z')] $*" | tee -a "$LOG" >&2; }
@@ -30,11 +35,24 @@ need_creds() {
   [[ -s "$RESTIC_PASSWORD_FILE" ]] || { alert "missing $RESTIC_PASSWORD_FILE (see AGENTS.md: install.sh with RESTIC_BACKUP_PASSWORD set, or --gen-password)"; exit 3; }
   if is_rclone_repo && [[ ! -s "$RCLONE_CONFIG" ]]; then alert "missing $RCLONE_CONFIG (run auth-gdrive.sh)"; exit 3; fi
 }
-RESTIC_OPTS=()
+RESTIC_OPTS=(); RESTIC_OPTS_TRASH=()
 if is_rclone_repo; then
   RESTIC_OPTS+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $RCLONE_SERVE_ARGS")
+  # forget/prune delete repository files: with PRUNE_USE_TRASH=1 those deletions go to the Drive trash
+  # (recoverable for ~30 days, but they count against the Drive quota until Google empties the trash).
+  _ta="${RCLONE_SERVE_ARGS//--drive-use-trash=false/}"
+  [[ "${PRUNE_USE_TRASH:-1}" == 1 ]] && _ta="$_ta --drive-use-trash=true"
+  RESTIC_OPTS_TRASH+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $_ta")
 fi
-R() { "$GB_BIN/restic" "${RESTIC_OPTS[@]}" "$@"; }
+# Every restic call is time-limited (a hung Drive call must not hold backup.lock forever).
+# timeout runs restic in its own process group and kills the whole group (restic + its rclone child);
+# -k: SIGKILL 60 s after SIGTERM. Override per call: R_TIMEOUT=<duration|0> R ... (0 = no limit).
+# Exit code 124 = timed out.
+_rt() { local t="${R_TIMEOUT:-${RESTIC_TIMEOUT:-3h}}"
+  if [[ "$t" == 0 ]]; then "$@"; else timeout -k 60 "$t" "$@"; fi; }
+R()  { _rt "$GB_BIN/restic" "${RESTIC_OPTS[@]}" "$@"; }
+RT() { _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" "$@"; }   # forget/prune (Drive trash)
+RCL() { timeout -k 30 "${RCLONE_TIMEOUT:-300}" "$GB_BIN/rclone" --config "$RCLONE_CONFIG" "$@"; }
 
 # Paths that go into a snapshot: the roots, plus each of staging, the config file, state/rebuild-kit
 # and (BACKUP_SECRETS=1) the secrets dir that sits outside all roots. Each is checked on its own.
@@ -109,6 +127,15 @@ sched_pid() {  # pid of the running scheduler loop (empty if none)
   local p; p=$(cat "$GB_STATE/scheduler.pid" 2>/dev/null || true)
   if [[ -n "$p" ]] && tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'scheduler\.sh'; then echo "$p"; fi
   return 0
+}
+# Who holds backup.lock since when (for the "lock held too long" alert). Written right after flock.
+took_lock() { echo "$(date +%s) $$ $(basename "$0") $*" > "$GB_STATE/lock-holder"; }
+lock_busy() { ! ( exec 7>>"$GB_STATE/backup.lock"; flock -n 7 ); }
+lock_age_h() {  # hours the current holder has held backup.lock (empty if free or holder unknown)
+  lock_busy || return 0
+  local t p rest; read -r t p rest < "$GB_STATE/lock-holder" 2>/dev/null || return 0
+  [[ -n "$p" && -d "/proc/$p" ]] || return 0
+  echo $(( ( $(date +%s) - t ) / 3600 ))
 }
 # First start of install/scheduler on this box: reference for the "no successful backup yet" alerts.
 mark_first_start() { [[ -s "$GB_STATE/first-start" ]] || date +%s > "$GB_STATE/first-start"; }

@@ -180,6 +180,66 @@ if [[ "$(id -u)" != 0 ]]; then
 fi
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 
+step "hardening: umask, timeouts, lock age, heartbeat, trash args, old-config defaults"
+check "state/logs/staging are chmod 700" test "$(stat -c %a "$TMP/state" "$TMP/logs" "$TMP/staging" | sort -u)" = 700
+rc=0; bash -c 'source "$1/lib.sh"; R_TIMEOUT=1 _rt sleep 5' _ "$REPO_DIR" >/dev/null 2>&1 || rc=$?
+check "R/_rt: a call over its time limit is killed (rc 124)" test "$rc" = 124
+{ cat "$TMP/config.env"; echo 'RESTIC_TIMEOUT_BACKUP=0.05'; } > "$TMP/config-to.env"
+echo "timeout probe" > "$SRC/docs/to.txt"; sleep 1
+rc=0; GB_CONFIG="$TMP/config-to.env" "$REPO_DIR/backup.sh" >/dev/null 2>&1 || rc=$?
+check "backup.sh: restic over RESTIC_TIMEOUT_BACKUP -> exit 124/137 + TIMED OUT alert" test "$rc" = 124 -o "$rc" = 137
+check "timeout alert text" grep -q 'TIMED OUT' "$TMP/state/ALERT"
+rm -f "$SRC/docs/to.txt"; "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+( exec 7>>"$TMP/state/backup.lock"; flock 7; exec sleep 60 ) & LP=$!; sleep 1   # $LP itself holds the lock
+echo "$(( $(date +%s) - 20 * 3600 )) $LP backup.sh auto" > "$TMP/state/lock-holder"
+"$REPO_DIR/status.sh" --local >"$TMP/status.out" 2>&1 || true
+check "status flags backup.lock held for 20h" grep -q 'backup.lock held for 20h' "$TMP/status.out"
+"$REPO_DIR/backup.sh" --quick >/dev/null 2>&1 || true
+check "a skipped backup raises the lock-age alert" grep -q 'backup.lock held for 20h' "$TMP/state/ALERT"
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+echo "$(( $(date +%s) - 20 * 3600 )) 999999999 gone" > "$TMP/state/lock-holder"
+"$REPO_DIR/status.sh" --local >"$TMP/status.out" 2>&1 || true
+check "lock age is not reported when the recorded holder pid is gone" not grep -q 'backup.lock held for' "$TMP/status.out"
+kill "$LP" 2>/dev/null || true; wait "$LP" 2>/dev/null || true; "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+( exec 7>>"$TMP/state/scheduler.lock"; flock 7; exec sleep 60 ) & SP=$!; sleep 1
+echo $(( $(date +%s) - 3 * 3600 )) > "$TMP/state/scheduler.heartbeat"
+"$REPO_DIR/status.sh" --local >"$TMP/status.out" 2>&1 || true
+check "status flags a scheduler loop whose heartbeat is 3h old" grep -q 'has not ticked for 180 min' "$TMP/status.out"
+date +%s > "$TMP/state/scheduler.heartbeat"
+"$REPO_DIR/status.sh" --local >"$TMP/status.out" 2>&1 || true
+check "a fresh heartbeat is not flagged" not grep -q 'has not ticked' "$TMP/status.out"
+kill "$SP" 2>/dev/null || true; wait "$SP" 2>/dev/null || true; rm -f "$TMP/state/scheduler.heartbeat"
+{ cat "$TMP/config.env"; echo 'export RESTIC_REPOSITORY="rclone:fake:folder"'; } > "$TMP/config-rc.env"
+ta=$(GB_CONFIG="$TMP/config-rc.env" bash -c 'source "$1/lib.sh"; printf "%s|%s" "${RESTIC_OPTS[*]}" "${RESTIC_OPTS_TRASH[*]}"' _ "$REPO_DIR")
+check "forget/prune (RT) use --drive-use-trash=true, normal calls keep false" bash -c '[[ "${1%%|*}" == *use-trash=false* && "${1#*|}" == *use-trash=true* && "${1#*|}" != *use-trash=false* ]]' _ "$ta"
+check "check.sh prunes via RT (Drive trash)" grep -q 'RT prune' "$REPO_DIR/check.sh"
+{ cat "$TMP/config.env"; echo 'unset RESTIC_TIMEOUT RESTIC_TIMEOUT_BACKUP RESTIC_TIMEOUT_CHECK LOCK_ALERT_HOURS HEARTBEAT_MAX_MIN PRUNE_USE_TRASH RCLONE_TIMEOUT'; } > "$TMP/config-old.env"
+run_ok "an older config.env without the new settings still works (lib.sh defaults)" env GB_CONFIG="$TMP/config-old.env" "$REPO_DIR/status.sh" --local
+check "...and prints Overall" grep -q '^Overall:' "$TMP/last.out"
+
+step "restore: host fallback"
+{ cat "$TMP/config.env"; echo 'BACKUP_HOST=renamed-host'; } > "$TMP/config-host.env"
+rc=0; GB_CONFIG="$TMP/config-host.env" "$REPO_DIR/restore.sh" list >"$TMP/rh.out" 2>&1 || rc=$?
+check "restore.sh list with a host that has 0 snapshots fails loudly (exit 4)" test "$rc" = 4
+check "...and lists the hosts that do have snapshots" grep -q 'Hosts in this repository.*grokbox' "$TMP/rh.out"
+run_ok "restore.sh --any-host list" env GB_CONFIG="$TMP/config-host.env" "$REPO_DIR/restore.sh" --any-host list
+run_ok "restore.sh --host grokbox ls latest" env GB_CONFIG="$TMP/config-host.env" "$REPO_DIR/restore.sh" --host grokbox ls latest "$SRC/docs"
+rc=0; GB_CONFIG="$TMP/config-host.env" "$REPO_DIR/restore.sh" latest "$SRC/docs" >/dev/null 2>&1 || rc=$?
+check "restore with a wrong host restores nothing (exit 4)" test "$rc" = 4
+
+step "auth-gdrive.sh --test (no network needed for the no-token case)"
+rc=0; "$REPO_DIR/auth-gdrive.sh" --test >"$TMP/auth.out" 2>&1 || rc=$?
+check "--test without a token fails with exit 1 and says so" test "$rc" = 1
+check "...naming the configured remote" grep -q 'no token for remote \[gdrive\]' "$TMP/auth.out"
+
+step "sqlite-snapshot: a DB reached through a symlinked directory is staged once"
+ln -s "$SRC/agent-data" "$SRC/alias-dir"
+mkdir -p "$TMP/staging/sqlite$SRC/alias-dir"; cp "$TMP/staging/sqlite$SRC/agent-data/app.db" "$TMP/staging/sqlite$SRC/alias-dir/app.db"
+python3 "$REPO_DIR/sqlite-snapshot.py" "$TMP/staging" "$TMP/sq.list" "$SRC/agent-data/*.db" "$SRC/alias-dir/*.db" 2>/dev/null
+check "staged list holds the real path once" test "$(cat "$TMP/sq.list")" = "$SRC/agent-data/app.db"
+check "stale copy under the alias path removed" test ! -e "$TMP/staging/sqlite$SRC/alias-dir/app.db"
+rm -f "$SRC/alias-dir" "$TMP/sq.list" "$TMP/sq.list.identity.json"; rmdir "$TMP/staging/sqlite$SRC/alias-dir" 2>/dev/null || true
+
 step "scheduler start/stop (paused, so no jobs run)"
 touch "$TMP/state/PAUSE"
 run_ok "install.sh --schedule" "$REPO_DIR/install.sh" --schedule
@@ -236,6 +296,15 @@ sem repair >/dev/null
 check "repair merges a renamed bot's split history into one file" test "$(ls "$SE"/transcripts/tid-1__*.jsonl | wc -l)" = 1 -a "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12"
 check "repair keeps the originals in state/replaced/" test "$(find "$SE/state/replaced" -name 'tid-1__*' | wc -l)" = 2
 check "export dirs are 700, files 600" test -z "$(find "$SE" -type d ! -perm 700; find "$SE" -type f ! -perm 600)"
+sum2=$(sha256sum "$SE"/transcripts/tid-1__*.jsonl | cut -d' ' -f1); pos2=$(sha256sum "$SE/state/positions.json" | cut -d' ' -f1)
+{ printf 'Transcript of agent "Test Bot" (tid-1), positions 13\xe2\x80\x9314 of 15:\n\n'
+  printf '{"role":"user","message":{"content":[{"type":"text","text":"m13"}]}}\n{"role":"user","message":{"content":[{"type":"te\n'; } > "$FX/bad.txt"
+rc=0; sem ingest --remove "$FX/bad.txt" >/dev/null 2>"$TMP/bad.err" || rc=$?
+check "ingest: a chunk with a truncated JSON line fails loudly (exit 3)" test "$rc" = 3
+check "...the result file is kept (not removed) for a retry" test -f "$FX/bad.txt"
+check "...the transcript and positions.json are unchanged (range not marked done)" test "$(sha256sum "$SE"/transcripts/tid-1__*.jsonl | cut -d' ' -f1)/$(sha256sum "$SE/state/positions.json" | cut -d' ' -f1)" = "$sum2/$pos2"
+page 12 14 15 m12 m13 m14 > "$FX/p4.txt"; sem ingest --remove "$FX/p4.txt" >/dev/null
+check "atomic append: new lines added, no temp file left" test "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12 m13 m14" -a -z "$(find "$SE/transcripts" -name '*.tmp')"
 
 echo; echo "smoke test: $PASS_N passed, $FAIL_N failed"
 [[ $FAIL_N == 0 ]]

@@ -75,7 +75,20 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
 - **Uptime + hydration guards**: no backup in the first 15 minutes after boot, or while the platform's hydration log says files are still being copied in.
 - **Consistent SQLite copies** of live databases (SQLite online-backup API) into `staging/sqlite/`, since copying live `.db` files is unsafe.
 - **Brain export**: indexes agent data directories and mirrors mounted agent stores (outside the roots) into `staging/brain/` with an `INDEX.md`.
-- **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. No e-mail is sent.
+- **Time limits**: every restic call runs under `timeout -k` (`RESTIC_TIMEOUT` 3 h, `RESTIC_TIMEOUT_BACKUP` 12 h, `RESTIC_TIMEOUT_CHECK` 8 h),
+  so a hung Drive call cannot hold `state/backup.lock` forever; a killed run exits 124/137 and raises an alert. `state/lock-holder` records
+  who holds the lock since when; `status.sh` and the watchdog flag a lock held longer than `LOCK_ALERT_HOURS` (13 h).
+- **Dead-man file**: the scheduler loop writes `state/scheduler.heartbeat` every minute; `status.sh` flags a loop that stopped
+  ticking (`HEARTBEAT_MAX_MIN`, 90 min) while no job holds the lock.
+- **Drive trash for forget/prune** (`PRUNE_USE_TRASH=1`): repository files deleted by forget/prune go to the Drive trash
+  (recoverable ~30 days; they count against the quota until Google empties the trash). Ordinary backups skip the trash.
+- **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. No e-mail is sent:
+  the box cannot send messages on its own. Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
+  open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
+  scheduler is noticed within a day.
+- **Optional second copy** (not set up by default): the Drive repository is the only copy. For a second one, use a restic repository on
+  another provider and `restic copy` into it on a schedule (`restic -r <second> copy --from-repo rclone:<remote>:<folder>`); keep its
+  password outside the box too.
 
 ## What is and is not backed up
 **Backed up**: everything under `BACKUP_ROOTS` (default `/workspace` and `/home/box`) including venvs, `~/.local`, `node_modules`, browser profiles,
@@ -95,7 +108,9 @@ cd /workspace/grokbox
 ./restore.sh ls latest /workspace/project  # browse a snapshot
 ./restore.sh latest /workspace/project     # restore into /workspace/restore-<date>-latest/ (live files untouched)
 ./restore.sh <id> --missing-only /workspace/project   # copy back ONLY files that are missing live (asks first; never overwrites)
+./restore.sh --any-host list               # config.env lost / host renamed: all hosts (also --host NAME)
 ```
+If `BACKUP_HOST` has no snapshots at all, `restore.sh` stops with an error that lists the hosts that do.
 **Disaster on a fresh box**: see [REBUILD.md](REBUILD.md): clone, restore the password (`RESTIC_BACKUP_PASSWORD`) and the OAuth client JSON,
 `./auth-gdrive.sh`, `./restore.sh latest`, move folders back.
 
@@ -127,7 +142,8 @@ You must also keep **outside the box**: the restic password, the Google OAuth cl
 
 ## Test
 `tests/smoke.sh` runs the whole flow in a temp dir against a local restic repo (no Google Drive needed): install, init, backups, restore with checksum verification,
-stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), status no-success flag, test restore, check, status, scheduler start/stop.
+stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), status no-success flag, test restore, check, status, scheduler start/stop,
+restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked SQLite dedupe, and the server-export failure cases.
 
 ## Files
 | file | what |

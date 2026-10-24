@@ -43,9 +43,11 @@ The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + expo
    `server-export-merge.py memory --remove --out <bot>-and-shared --label <bot> <files>` (at most ~15 facts per query).
    Use `write_to_file: true` if the tool offers it. Some bots' RecallMemory has no such option and returns the
    result inline: then paste each result **verbatim** into a file with a quoted heredoc (one Shell call per
-   result), `cat > /workspace/agent-tools/mem-<n>.txt <<'EOF'` ... `EOF`, and pass those files. The quoted
-   `'EOF'` stops the shell from expanding `$`, backticks or `\` in the facts. `--remove` deletes them afterwards.
-5. `server-export-merge.py age --max-hours 30 <partner-covered ids>`: exit 1 = the partner's run is missing.
+   result), `cat > /workspace/agent-tools/<bot>-mem-<n>.txt <<'GROKBOX_MEM_END_7Q2'` ... `GROKBOX_MEM_END_7Q2`, and pass those files.
+   The quoted delimiter stops the shell from expanding `$`, backticks or `\` in the facts; an unusual
+   delimiter (not `EOF`) cannot end the heredoc early, and a per-bot file name keeps two bots running at
+   the same time from overwriting each other's files. `--remove` deletes them afterwards.
+5. `server-export-merge.py age --max-hours 26 <partner-covered ids>`: exit 1 = the partner's run is missing.
 6. Check `INDEX.md`: no `gap` rows and no warnings. The next hourly snapshot picks everything up.
 
 A bot that is renamed keeps one file: the transcript file is renamed to the new slug. `repair` merges files

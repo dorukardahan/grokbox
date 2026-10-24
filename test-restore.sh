@@ -9,6 +9,7 @@
 source "$(dirname "$0")/lib.sh"; need_creds
 if [[ "${GB_LOCK_HELD:-0}" != 1 ]]; then
   exec 9>"$GB_STATE/backup.lock"; flock -w 3600 9 || { log "test-restore: lock busy for 1h; skip"; exit 0; }
+  took_lock test-restore
 fi
 SNAP="${1:-}"
 if [[ -z "$SNAP" ]]; then

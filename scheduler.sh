@@ -25,6 +25,7 @@ log "scheduler started pid $$ (quick every ${QUICK_EVERY_MIN}m)"
 RC=0; run(){ RC=0; "$@" 8>&- || RC=$?; (( RC == 0 )) || log "scheduler: $(basename "$1") ${2:-} exited rc=$RC"; return 0; }
 get(){ cat "$GB_STATE/$1" 2>/dev/null || echo 0; }
 while true; do
+  date +%s > "$GB_STATE/scheduler.heartbeat"   # dead-man file: status.sh flags a loop that stopped ticking
   sleep $(( 60 - $(date +%-S) )) 8>&-
   if [[ "$(sig)" != "$SIG" ]]; then
     if bash -n "$GB_DIR/scheduler.sh" && bash -n "$GB_DIR/lib.sh" && bash -c 'source "$1"' _ "$GB_DIR/lib.sh" >/dev/null 2>&1; then
@@ -52,9 +53,14 @@ while true; do
     else ref=$(get first-start); what="none since the scheduler first started"; fi
     age_h=$(( ( $(date +%s) - ref ) / 3600 ))
     if (( age_h >= ALERT_NO_SUCCESS_HOURS )); then
-      if ( exec 7>>"$GB_STATE/backup.lock"; flock -n 7 ); then
+      if ! lock_busy; then
         alert "no successful HOURLY snapshot for ${age_h}h ($what); check $LOG"
-      else log "watchdog: last hourly success ${age_h}h ago but a backup is running now"; fi
+      else
+        la=$(lock_age_h)
+        if [[ -n "$la" ]] && (( la >= LOCK_ALERT_HOURS )); then
+          alert "no successful HOURLY snapshot for ${age_h}h and backup.lock is held for ${la}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null)"
+        else log "watchdog: last hourly success ${age_h}h ago but a backup is running now"; fi
+      fi
     fi
   fi
 done

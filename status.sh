@@ -5,6 +5,7 @@
 #   status.sh --local  no network (fast; for watchdogs)
 #   status.sh --ack    acknowledge alerts: moves state/ALERT to logs/alerts-acked.log
 source "$(dirname "$0")/lib.sh"; set +e; trap - ERR
+R_TIMEOUT=300   # status must answer quickly even if Drive hangs
 ts(){ [[ -s "$1" ]] && date -d "@$(cat "$1")" '+%F %H:%M %Z' || echo never; }
 if [[ "${1:-}" == --ack ]]; then
   if [[ -s "$GB_STATE/ALERT" ]]; then cat "$GB_STATE/ALERT" >> "$GB_LOGS/alerts-acked.log"; rm -f "$GB_STATE/ALERT"; echo "alerts acknowledged"
@@ -46,12 +47,20 @@ else   # a first success exists: the daily check must keep running (reference: l
   if [[ -n "$ref" ]] && (( now - ref >= 48 * 3600 )); then
     problems=1; echo "!! last check is $(( (now - ref) / 3600 ))h old or never ran (expected daily)"; fi
 fi
-if ! ( exec 7>>"$GB_STATE/backup.lock"; flock -n 7 ); then
+if lock_busy; then
   bp=$(pgrep -f "$GB_BIN/restic .* (backup|restore|prune|check|forget)" | head -1)
   if [[ -n "$bp" ]]; then echo "Running now: restic pid $bp for $(ps -o etime= -p "$bp" | tr -d ' ')"
   else echo "Running now: lock held (preparing)"; fi
+  la=$(lock_age_h)
+  if [[ -n "$la" ]] && (( la >= LOCK_ALERT_HOURS )); then
+    problems=1; echo "!! backup.lock held for ${la}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null) (hung job?)"; fi
 fi
-if sched_running; then echo "Scheduler: running (pid $(sched_pid))"; else problems=1; echo "!! Scheduler: NOT running (run install.sh --schedule)"; fi
+if sched_running; then
+  echo "Scheduler: running (pid $(sched_pid))"
+  hb=$(cat "$GB_STATE/scheduler.heartbeat" 2>/dev/null || echo "")
+  if [[ -n "$hb" ]] && ! lock_busy && (( $(date +%s) - hb >= ${HEARTBEAT_MAX_MIN:-90} * 60 )); then
+    problems=1; echo "!! Scheduler loop has not ticked for $(( ($(date +%s) - hb) / 60 )) min (hung?): ./install.sh --restart-scheduler"; fi
+else problems=1; echo "!! Scheduler: NOT running (run install.sh --schedule)"; fi
 if [[ ! -s "$RESTIC_PASSWORD_FILE" ]]; then problems=1; echo "!! credentials: restic password file missing ($RESTIC_PASSWORD_FILE); see AGENTS.md step 3"; fi
 if is_rclone_repo && [[ ! -s "$RCLONE_CONFIG" ]]; then problems=1; echo "!! credentials: rclone config missing ($RCLONE_CONFIG); run auth-gdrive.sh"; fi
 if [[ -e "$SQLITE_LATCH" ]]; then problems=1; echo "!! SQLITE LATCH set ($(ts "$SQLITE_LATCH")): SQLite staging failed; forget/prune blocked until a fully successful hourly backup"; fi

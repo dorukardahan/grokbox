@@ -36,15 +36,20 @@ never read the server any other way (no cookies, scraped tokens or internal APIs
 do not change other bots' settings, routines or memory.
 
 PART A - box backup health
-A1. Run: cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"
+A1. Run: cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat state/ALERT 2>/dev/null
     Always run status.sh --local, even if install.sh --schedule failed.
-A2. Healthy = schedule_rc=0 AND the last status line is "Overall: OK". If healthy, go to PART B.
+A2. Healthy = schedule_rc=0 AND the last status line is "Overall: OK" AND nothing is printed after
+    "--- open alerts:". If healthy, go to PART B. Every open alert line is reported to the owner (this
+    chat report is the alert channel: the box itself cannot send messages).
 A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
     - "rclone config missing", "Drive unreachable", invalid_grant / token expired / 401 errors: the Drive
-      authorisation is gone. Tell the owner it needs a new consent: run ./auth-gdrive.sh, open the printed
+      authorisation is gone. Tell the owner it needs a new consent: run ./auth-gdrive.sh --reauth, open the printed
       localhost URL in the box's own browser, and the owner signs in as <DRIVE_ACCOUNT> and clicks Allow.
       Do not try to fix tokens yourself.
     - "stale-computer guard" (exit 4): do NOT force. Tell the owner; compare with ./restore.sh ls latest.
+    - "backup.lock held for Nh" or "Scheduler loop has not ticked": a job is hung. Tell the owner; the
+      fix is ./install.sh --restart-scheduler (it waits for the lock, so it never interrupts a backup).
+    - To test the Drive login without changing anything: ./auth-gdrive.sh --test
     - Any other alert: one line each, with the likely cause.
     Only run ./status.sh --ack after the cause is fixed AND the owner has been told.
 
@@ -63,12 +68,13 @@ B4. Memory: call RecallMemory with about 10 generic queries ("user preferences",
     python3 <REPO>/server-export-merge.py memory --remove --out grokbox-main-and-shared --label GrokBox-Main <files>
     If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
     VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
-    cat > /workspace/agent-tools/mem-1.txt <<'EOF'
+    cat > /workspace/agent-tools/grokbox-main-mem-1.txt <<'GROKBOX_MEM_END_7Q2'
     <the RecallMemory result, unchanged>
-    EOF
-    and pass those files instead. Never edit, summarize or add facts.
-B5. Partner check: python3 <REPO>/server-export-merge.py age --max-hours 30 <MAIN_ID>
-    Exit 1 means GrokBox-Assist has not exported you in 30 h: report "GrokBox-Assist did
+    GROKBOX_MEM_END_7Q2
+    (numbered -1, -2, ...; the odd end marker cannot appear inside a result) and pass those files instead.
+    Never edit, summarize or add facts.
+B5. Partner check: python3 <REPO>/server-export-merge.py age --max-hours 26 <MAIN_ID>
+    Exit 1 means GrokBox-Assist has not exported you in 26 h: report "GrokBox-Assist did
     not run" (once the setup is older than a day).
 B6. Read <REPO>/staging/server-export/INDEX.md. Report rows with status "gap" or warnings. Do not report
     "empty" / "not readable" rows, except a bot that was readable before and now is not.

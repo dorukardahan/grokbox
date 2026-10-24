@@ -4,7 +4,9 @@
 ReadTranscript is a Grok Bot tool, not callable from cron, so a bot's daily routine (GrokBox-Main, and
 GrokBox-Assist for Main's own conversation) pulls the pages (in=<id>, limit=200, write_to_file=true, paging back with `before`) and runs:
 
-  server-export-merge.py ingest [--remove] CHUNK...   merge chunks (idempotent; re-ingest is a no-op)
+  server-export-merge.py ingest [--remove] CHUNK...   merge chunks (idempotent; re-ingest is a no-op).
+                                                     A chunk with an invalid JSON message line is NOT
+                                                     ingested (kept, exit 3), so no message is lost
   server-export-merge.py next                         what to call next (JSON): per transcript the
                                                      `before` value still needed, or "newest"; {} = all complete
   server-export-merge.py index                        rewrite INDEX.md
@@ -61,15 +63,21 @@ def canon(line):
     return json.dumps(json.loads(line), sort_keys=True, ensure_ascii=False)
 
 
+class BadChunk(Exception):
+    """A result file that must not be ingested (it would lose messages)."""
+
+
 def parse_chunk(path, fallback_id=None):
     """-> dict(id, name, a, b, n, lines[]) or dict(id, n=0) for an empty transcript, or None."""
     text = open(path, encoding='utf-8', errors='replace').read()
-    lines, head = [], []
+    lines, head, bad = [], [], 0
     for l in text.split('\n'):
         if l.startswith('{'):
             try: json.loads(l); lines.append(l); continue
-            except ValueError: pass
+            except ValueError: bad += 1   # truncated/corrupt message line: never drop it silently
         if not lines: head.append(l)   # header lives before the first message; never search message bodies
+    if bad:
+        raise BadChunk(f"{bad} message line(s) are not valid JSON (truncated result?)")
     head = '\n'.join(head)
     if fallback_id and not lines and 'No conversation, agent, or subagent' in head:
         return {'id': fallback_id, 'name': None, 'n': 0, 'empty': True, 'unreadable': True}
@@ -180,9 +188,15 @@ def stitch(pos, tid):
                     rec.setdefault('warnings', []).append(
                         f"{time.strftime('%F %T%z')}: overlap {a}-{M} matched no lines; appended page whole")
                 new = new[k:]
-            with open(path, 'a', encoding='utf-8') as fh:
+            # atomic append: write old + new into a temp file, fsync, then rename over the original, so a
+            # crash never leaves a half-written line (and max_pos is only advanced after the rename)
+            tmp = path + '.tmp'
+            with open(tmp, 'w', encoding='utf-8') as fh:
+                if os.path.exists(path):
+                    with open(path, encoding='utf-8') as old: shutil.copyfileobj(old, fh)
                 for l in new: fh.write(l + '\n')
-            os.chmod(path, 0o600)
+                fh.flush(); os.fsync(fh.fileno())
+            os.chmod(tmp, 0o600); os.replace(tmp, path)
             rec['lines'] = rec.get('lines', 0) + len(new)
             rec['max_pos'] = b
             rec['last_export'] = time.strftime('%F %T%z')
@@ -195,9 +209,12 @@ def stitch(pos, tid):
 def ingest(paths, remove=False, fallback_id=None):
     for d in (BASE, TDIR, SDIR, PEND): os.makedirs(d, mode=0o700, exist_ok=True); os.chmod(d, 0o700)
     pos = load_pos()
-    touched = set()
+    touched, failed = set(), []
     for p in paths:
-        c = parse_chunk(p, fallback_id)
+        try:
+            c = parse_chunk(p, fallback_id)
+        except BadChunk as e:   # keep the file, do not record its range: the next run fetches it again
+            failed.append(p); print(f"ERROR (not ingested, file kept): {p}: {e}", file=sys.stderr); continue
         if not c:
             print(f"SKIP (no transcript header): {p}", file=sys.stderr); continue
         tid = c['id']
@@ -217,6 +234,10 @@ def ingest(paths, remove=False, fallback_id=None):
     for tid in touched: stitch(pos, tid)
     save_pos(pos); write_index(pos)
     print(json.dumps(next_calls(pos), ensure_ascii=False))
+    if failed:
+        print(f"ERROR: {len(failed)} result file(s) were NOT ingested (invalid JSON lines); fetch those pages again", file=sys.stderr)
+        return 3
+    return 0
 
 
 def next_calls(pos):
@@ -306,7 +327,7 @@ if __name__ == '__main__':
         fid = None
         if '--id' in a:
             i = a.index('--id'); fid = a[i + 1]; del a[i:i + 2]
-        ingest(a, rm, fid)
+        sys.exit(ingest(a, rm, fid))
     elif a[0] == 'memory':
         rm = '--remove' in a; a = [x for x in a[1:] if x != '--remove']
         kw = {}

@@ -19,7 +19,12 @@ if [[ $DRY == 1 ]]; then   # private temp files: a dry run never touches shared 
   EXCL_FILE="$DRY_TMP/excludes.combined"
 else
   exec 9>"$GB_STATE/backup.lock"
-  if ! flock -w "$WAIT" 9; then log "$MODE: another backup/check is running; skip"; exit 0; fi
+  if ! flock -w "$WAIT" 9; then
+    a=$(lock_age_h)
+    if [[ -n "$a" ]] && (( a >= LOCK_ALERT_HOURS )); then
+      alert "backup.lock held for ${a}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null) (hung job? restic calls time out after RESTIC_TIMEOUT_BACKUP=$RESTIC_TIMEOUT_BACKUP)"; fi
+    log "$MODE: another backup/check is running; skip"; exit 0; fi
+  took_lock "$MODE"
   need_creds
 fi
 ROOTS=("${BACKUP_ROOTS[@]}"); [[ $MODE == quick ]] && ROOTS=("${QUICK_ROOTS[@]}")
@@ -111,9 +116,10 @@ read -r F B N < <(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));pri
 TAGS=(--tag "$MODE" --tag "profile=$BACKUP_PROFILE" --tag "files=$F" --tag "bytes=$B" --tag "newest=$N")
 log "backup start mode=$MODE profile=$BACKUP_PROFILE files=$F bytes=$B parent=${PARENT[1]:-none}"
 rc=0   # `|| rc=$?` keeps both errexit and the ERR trap quiet for restic's rc=3 (partial but valid snapshot)
-R backup --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
+R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
   "${PATHS[@]}" >>"$LOG" 2>&1 || rc=$?
 # restic: 0 ok, 3 = snapshot created but some files unreadable (still a good snapshot)
+if [[ $rc == 124 || $rc == 137 ]]; then alert "restic backup ($MODE) TIMED OUT after $RESTIC_TIMEOUT_BACKUP and was killed (rc=$rc); no new snapshot; the next run continues (already uploaded data is reused)"; exit "$rc"; fi
 if [[ $rc != 0 && $rc != 3 ]]; then alert "restic backup ($MODE) failed rc=$rc (see $LOG)"; exit "$rc"; fi
 if [[ $rc == 3 ]]; then   # snapshot exists but is incomplete: keep it, do not treat it as a good baseline
   date +%s > "$GB_STATE/last-partial"
@@ -135,7 +141,7 @@ if [[ -n "$NO_FORGET_WHY" ]]; then log "forget skipped: $NO_FORGET_WHY"
 elif [[ -e "$GUARD_LATCH" ]]; then alert "forget skipped: stale guard latch ($GUARD_LATCH) is set"
 elif [[ -e "$SQLITE_LATCH" ]]; then alert "forget skipped: SQLite staging failed earlier ($SQLITE_LATCH is set; clears after a fully successful hourly backup)"
 elif [[ $FORGET == 1 && $MODE == auto ]]; then   # forget only; the actual prune happens daily in check.sh
-  R forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
-  R forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+  RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
+  RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
 fi
 exit 0

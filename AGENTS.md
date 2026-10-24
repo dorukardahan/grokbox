@@ -118,7 +118,7 @@ Steps:
 4. **Your own memory:** the two bots cannot read your private memory. Keep durable facts in the user's
    shared memory, and export your private memory once now. Run a few `RecallMemory` queries with
    `write_to_file: true` (if your RecallMemory has no such option, paste each inline result verbatim into
-   `/workspace/agent-tools/mem-<n>.txt` with a quoted heredoc, `<<'EOF'`; see [docs/server-export.md](docs/server-export.md)), then:
+   `/workspace/agent-tools/primary-mem-<n>.txt` with a quoted heredoc, `<<'GROKBOX_MEM_END_7Q2'`; see [docs/server-export.md](docs/server-export.md)), then:
    `python3 server-export-merge.py memory --remove --out primary-bot-private --label "primary bot" <files>`.
 5. **Check** `staging/server-export/INDEX.md`. Every row should be `complete`, `empty` or `not readable`,
    and Main, Assist and your own id must be present. Then run `./backup.sh` (or wait for the next hourly)
