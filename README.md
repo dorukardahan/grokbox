@@ -83,7 +83,8 @@ cd /workspace/grokbox
 
 ## Limits: what a box backup cannot contain
 Data that lives only on the platform's servers or in the app cannot be read from inside the box, so it is **not** backed up:
-- the authoritative server-side copies of memory, routines/automations and conversation history (the box holds a synced local copy, which is what gets backed up);
+- the authoritative server-side copies of memory, routines/automations and conversation history (the box holds a synced local copy, which is what gets backed up).
+  Conversations and the primary bot's + shared memory can be pulled in by a daily bot routine: see [docs/server-export.md](docs/server-export.md);
 - connector/plugin OAuth grants (mail, drive, chat apps...);
 - app-managed secrets and environment variables (re-add them in the app; keep `RESTIC_BACKUP_PASSWORD` in a password manager too);
 - billing and usage settings, pages/canvases;
@@ -120,9 +121,11 @@ stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), stat
 | `manifest.py` | file count / bytes / newest mtime for the guard |
 | `sqlite-snapshot.py` | consistent copies of live SQLite databases |
 | `brain-export.py` | agent data/store discovery, mirror of stores outside the roots, `INDEX.md` |
+| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/` ([docs/server-export.md](docs/server-export.md)) |
 | `rebuild-kit/inventory.sh` | records installed tools and venv freezes into `state/rebuild-kit/` |
 | `excludes.txt`, `excludes-secrets.txt`, `excludes-lean.txt` | always / only if `BACKUP_SECRETS=0` / only if `BACKUP_PROFILE=lean` |
 | `docs/google-cloud-setup.md` | exact Google Cloud steps for the OAuth client |
+| `docs/server-export.md` | daily routine that pulls every bot's server-side conversation + memory into the backup |
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |
 | `PRIVACY.md` | privacy policy (also used as the OAuth consent-screen policy URL) |
