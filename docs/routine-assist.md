@@ -24,8 +24,8 @@ Same as [routine-main.md](routine-main.md): `<REPO>`, `<AGENTS_DIR>`, `<DRIVE_AC
 ```text
 GrokBox-Assist daily run. Repo at <REPO>. Report to the owner ONLY on problems, in <LANGUAGE>.
 Rules: never print secrets; never use backup.sh --force; never prune/forget/delete snapshots or Drive data;
-never print or summarize conversation content; always use write_to_file: true for ReadTranscript and
-RecallMemory; delete only result files you created; no cookies, scraped tokens or internal APIs;
+never print or summarize conversation content; always use write_to_file: true for ReadTranscript (and for
+RecallMemory when it offers it); delete only result files you created; no cookies, scraped tokens or internal APIs;
 do not change other bots' settings, routines or memory.
 
 1. Export GrokBox-Main and the primary chat: call ReadTranscript {in: <MAIN_ID>, limit: 200} and
@@ -36,6 +36,12 @@ do not change other bots' settings, routines or memory.
    other ids in the output are Main's job (step 3 checks them).
 2. Memory: RecallMemory with 3-5 generic queries ("user preferences", "projects", "decisions", "this week"),
    then: python3 <REPO>/server-export-merge.py memory --remove --out grokbox-assist-and-shared --label GrokBox-Assist <files>
+   If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
+   VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
+   cat > /workspace/agent-tools/mem-1.txt <<'EOF'
+   <the RecallMemory result, unchanged>
+   EOF
+   and pass those files instead. Never edit, summarize or add facts.
 3. Did Main run today? Run: python3 <REPO>/server-export-merge.py age --max-hours 30 <ASSIST_ID>
    (Main exports this bot every run, so this is the age of Main's last export), and also
    cd <REPO> && ./status.sh --local

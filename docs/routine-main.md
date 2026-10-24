@@ -31,7 +31,7 @@ GrokBox-Main daily run. Box backups go to <REMOTE> (Google Drive of <DRIVE_ACCOU
 Report to the owner ONLY if something below needs attention, in <LANGUAGE>; otherwise stay silent.
 Rules: never print secrets (secrets/*, restic password, tokens, auth URLs); never use backup.sh --force;
 never prune/forget/delete snapshots or Drive data; never print or summarize conversation content;
-always call ReadTranscript and RecallMemory with write_to_file: true; delete only result files you created;
+always call ReadTranscript (and RecallMemory, when it offers it) with write_to_file: true; delete only result files you created;
 never read the server any other way (no cookies, scraped tokens or internal APIs);
 do not change other bots' settings, routines or memory.
 
@@ -61,6 +61,12 @@ B3. For each "id": N call ReadTranscript {in: id, limit: 200, before: N}; for "i
 B4. Memory: call RecallMemory with about 10 generic queries ("user preferences", "projects", "bots and agents",
     "routines", "accounts and services", "decisions", "people", "this week", the current month name), then:
     python3 <REPO>/server-export-merge.py memory --remove --out grokbox-main-and-shared --label GrokBox-Main <files>
+    If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
+    VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
+    cat > /workspace/agent-tools/mem-1.txt <<'EOF'
+    <the RecallMemory result, unchanged>
+    EOF
+    and pass those files instead. Never edit, summarize or add facts.
 B5. Partner check: python3 <REPO>/server-export-merge.py age --max-hours 30 <MAIN_ID>
     Exit 1 means GrokBox-Assist has not exported you in 30 h: report "GrokBox-Assist did
     not run" (once the setup is older than a day).

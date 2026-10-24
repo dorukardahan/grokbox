@@ -39,8 +39,12 @@ The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + expo
 3. For each `id: N` call `ReadTranscript {in: id, limit: 200, before: N}` (`"newest"`: without `before`),
    then ingest again. Repeat until `{}`. For long backlogs you may fire `before: N, N-35, N-70, ...` in
    parallel; overlaps are de-duplicated and any gap reappears in the output.
-4. `RecallMemory` with generic queries, `write_to_file: true`, then
+4. `RecallMemory` with generic queries, then
    `server-export-merge.py memory --remove --out <bot>-and-shared --label <bot> <files>` (at most ~15 facts per query).
+   Use `write_to_file: true` if the tool offers it. Some bots' RecallMemory has no such option and returns the
+   result inline: then paste each result **verbatim** into a file with a quoted heredoc (one Shell call per
+   result), `cat > /workspace/agent-tools/mem-<n>.txt <<'EOF'` ... `EOF`, and pass those files. The quoted
+   `'EOF'` stops the shell from expanding `$`, backticks or `\` in the facts. `--remove` deletes them afterwards.
 5. `server-export-merge.py age --max-hours 30 <partner-covered ids>`: exit 1 = the partner's run is missing.
 6. Check `INDEX.md`: no `gap` rows and no warnings. The next hourly snapshot picks everything up.
 

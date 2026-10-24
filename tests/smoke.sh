@@ -222,6 +222,12 @@ sem memory "$FX/m1.txt" "$FX/m2.txt" >/dev/null; sem memory "$FX/m1.txt" >/dev/n
 check "memory facts de-duplicated (3 unique, wrapped line joined)" test "$(grep -c '^- (' "$SE/memory/primary-bot-and-shared.md")" = 3 -a "$(grep -c 'fact two wrapped' "$SE/memory/primary-bot-and-shared.md")" = 1
 sem memory --out grokbox-main-and-shared --label GrokBox-Main "$FX/m2.txt" >/dev/null
 check "memory --out writes its own file with its label" grep -q 'GrokBox-Main' "$SE/memory/grokbox-main-and-shared.md"
+cat > "$FX/m3.txt" <<'EOF'
+Top 50 matches for "c" in your memory (1 total):
+- (2026-01-04) [journal] pasted inline: costs $5 and `x` stays literal
+EOF
+sem memory --remove --out pasted --label Pasted "$FX/m3.txt" >/dev/null
+check "inline RecallMemory result pasted via quoted heredoc is ingested verbatim" grep -qF 'costs $5 and `x` stays literal' "$SE/memory/pasted.md"
 check "age: a just-exported id passes" bash -c "SERVER_EXPORT_DIR='$SE' python3 '$REPO_DIR/server-export-merge.py' age tid-1 >/dev/null"
 check "age: an id never exported fails (missed run)" bash -c "! SERVER_EXPORT_DIR='$SE' python3 '$REPO_DIR/server-export-merge.py' age tid-1 tid-missing >/dev/null"
 tf=$(ls "$SE"/transcripts/tid-1__*.jsonl); head -n 9 "$tf" > "$SE/transcripts/tid-1__old-name.jsonl"; tail -n 7 "$tf" > "$tf.n"; mv "$tf.n" "$tf"
