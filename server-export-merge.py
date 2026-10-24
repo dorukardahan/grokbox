@@ -34,8 +34,11 @@ OLDER = re.compile(r'before=(\d+)')
 os.umask(0o077)
 
 
+_TRANSLIT = str.maketrans({'ı': 'i', 'ß': 'ss', 'ø': 'o', 'ł': 'l', 'đ': 'd', 'æ': 'ae', 'œ': 'oe', 'þ': 'th'})
+
+
 def slug(s):
-    s = unicodedata.normalize('NFKD', s.replace('ı', 'i')).encode('ascii', 'ignore').decode()
+    s = unicodedata.normalize('NFKD', s.translate(_TRANSLIT)).encode('ascii', 'ignore').decode()
     return re.sub(r'[^a-z0-9]+', '-', s.lower()).strip('-') or 'unnamed'
 
 
@@ -182,7 +185,7 @@ def write_index(pos):
     rows = sorted(pos.items(), key=lambda kv: (kv[1].get('name') or '').lower())
     with open(os.path.join(BASE, 'INDEX.md'), 'w', encoding='utf-8') as f:
         f.write(f"# Server-side transcript export — {time.strftime('%F %H:%M %z')}\n\n"
-                "Pulled with ReadTranscript by the primary bot (see backup-system/README.md, 'Server-side export').\n\n"
+                "Pulled with ReadTranscript by the primary bot's daily routine and merged by server-export-merge.py.\n\n"
                 "| bot / conversation | id | server messages | exported up to | lines | last export | status |\n|---|---|---|---|---|---|---|\n")
         for tid, r in rows:
             st = 'complete' if r.get('max_pos', -1) >= r.get('total', 0) - 1 and not r.get('pending') else \

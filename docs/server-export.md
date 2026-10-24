@@ -26,6 +26,9 @@ matching the longest suffix of the exported file against the page's head. Re-ing
 so an interrupted run can be repeated.
 
 ## Daily routine (primary bot; always `write_to_file: true`, never print the content)
+The ready-to-paste prompt, which also does the backup health check, is in [routine-template.md](routine-template.md).
+Setup (creating the routine with `UpdateRoutine`, first full export): [../AGENTS.md](../AGENTS.md) step 8.
+The steps it runs:
 1. For every directory `<id>` in the agents dir, call `ReadTranscript {in: <id>, limit: 200}` (newest page).
    The calls can run in parallel.
 2. `python3 <repo>/server-export-merge.py ingest --remove <result files>`. For a result that says

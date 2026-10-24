@@ -83,8 +83,10 @@ cd /workspace/grokbox
 
 ## Limits: what a box backup cannot contain
 Data that lives only on the platform's servers or in the app cannot be read from inside the box, so it is **not** backed up:
-- the authoritative server-side copies of memory, routines/automations and conversation history (the box holds a synced local copy, which is what gets backed up).
-  Conversations and the primary bot's + shared memory can be pulled in by a daily bot routine: see [docs/server-export.md](docs/server-export.md);
+- the authoritative server-side copies of routines/automations (the box holds a synced local copy, which is what gets backed up).
+  Every bot's server-side **conversation history and the bot's memory ARE backed up**: the one daily bot routine
+  ([docs/routine-template.md](docs/routine-template.md)) pulls them into `staging/server-export/` ([docs/server-export.md](docs/server-export.md)).
+  Still out of reach: the bot's own main chat, its subagent runs, and other bots' private memory;
 - connector/plugin OAuth grants (mail, drive, chat apps...);
 - app-managed secrets and environment variables (re-add them in the app; keep `RESTIC_BACKUP_PASSWORD` in a password manager too);
 - billing and usage settings, pages/canvases;
@@ -98,7 +100,9 @@ You must also keep **outside the box**: the restic password, the Google OAuth cl
 3. Google OAuth client: [docs/google-cloud-setup.md](docs/google-cloud-setup.md) -> `secrets/gdrive-oauth-client.json`; `./auth-gdrive.sh` (one consent click).
    Fallback: `./auth-gdrive.sh --rclone-default-client` (shared, rate-limited client; see [docs/migrate-client.md](docs/migrate-client.md)).
 4. `./install.sh --init`, `./backup.sh --dry-run`, `./backup.sh`, `./install.sh --schedule`, `./status.sh`.
-5. A daily routine that runs `./install.sh --schedule && ./status.sh --local` and reports only if `Overall` is not `OK`.
+5. One daily bot routine, created by the bot itself from [docs/routine-template.md](docs/routine-template.md): health check
+   (`./install.sh --schedule`, `./status.sh`) + incremental server-side export of all bots' conversations and memory; it reports only problems.
+   The first full export runs once right after setup.
 
 ## Test
 `tests/smoke.sh` runs the whole flow in a temp dir against a local restic repo (no Google Drive needed): install, init, backups, restore with checksum verification,
@@ -125,6 +129,7 @@ stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), stat
 | `rebuild-kit/inventory.sh` | records installed tools and venv freezes into `state/rebuild-kit/` |
 | `excludes.txt`, `excludes-secrets.txt`, `excludes-lean.txt` | always / only if `BACKUP_SECRETS=0` / only if `BACKUP_PROFILE=lean` |
 | `docs/google-cloud-setup.md` | exact Google Cloud steps for the OAuth client |
+| `docs/routine-template.md` | ready-to-paste daily routine prompt (health + server export), with placeholders |
 | `docs/server-export.md` | daily routine that pulls every bot's server-side conversation + memory into the backup |
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |

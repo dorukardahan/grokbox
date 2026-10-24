@@ -87,25 +87,40 @@ If the dry run or backup exits with 4, the stale guard tripped: see rule 3. On e
 ```
 The scheduler is a background process: it **dies on a box move** (and with it all backups). That is what step 8 fixes.
 
-### 8. Daily watchdog routine (do this; it is what keeps backups alive)
-Create a **daily** Grok Bot routine/automation (any hour) with this task:
-> Run `cd /workspace/grokbox && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"`.
-> Always run `status.sh --local`, even if `install.sh --schedule` failed. Stay silent only if `schedule_rc=0`
-> AND the last line of `status.sh` was `Overall: OK`. Otherwise report the `!!` lines (and the failed
-> `install.sh --schedule`) to the user. Never use `--force`, never prune or delete anything, never print secrets.
+### 8. ONE daily routine: health watchdog + server-side export (do this yourself)
+A box backup alone misses what lives only on the Grok Bot servers: every bot's full conversation history
+and the bot's memory. You can read them with your own tools `ReadTranscript` and `RecallMemory`. These are
+**bot tools**: no script, cron or `scheduler.sh` can call them. Never use cookies, scraped tokens or internal
+APIs instead. So the export runs inside the same daily routine that keeps the scheduler alive. There is
+**one** routine and no separate system.
 
-`install.sh --schedule` is idempotent: it restarts the scheduler after a box move and does nothing otherwise. The
-routine reports to the user **only when Overall != OK**.
+1. Open [docs/routine-template.md](docs/routine-template.md). Fill in the placeholders: `<REPO>` (this repo's
+   path), `<DRIVE_ACCOUNT>`, `<REMOTE>` (`GB_REMOTE:GB_FOLDER` from config.env), `<AGENTS_DIR>` (normally
+   `/home/box/agent-data/agents`), `<LANGUAGE>` (the user's language) and `<HOUR>`.
+2. **Create the routine yourself** with your `UpdateRoutine` tool: daily, at that hour in the user's time
+   zone, with the filled-in prompt. The user does not need to do anything. If a Grok Box routine already
+   exists, update it instead of adding a second one.
+3. **Run the first full export now**, right after setup, by doing Part B of the prompt yourself once. It
+   pages back through every conversation, so expect many rounds of `ReadTranscript` + `server-export-merge.py
+   ingest`, until `next` prints `{}`. Then run the memory step. Never print or summarize message content.
+4. Check `staging/server-export/INDEX.md`: every row should be `complete`, `empty` or `not readable`. Then
+   run `./backup.sh` (or wait for the next hourly) so the export is in a snapshot.
+
+The routine reports to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale guard,
+or export gaps. `install.sh --schedule` is idempotent: it restarts the scheduler after a box move and does
+nothing otherwise. Details: [docs/server-export.md](docs/server-export.md).
 
 ### 9. Finish
 Tell the user, briefly: what is backed up, the schedule, where the repo is (`Drive: GrokBox/restic`), and remind them
 about the three things they must keep outside the box: the restic password, the OAuth client JSON, and their Google
-account access. Mention what cannot be backed up (README "Limits": server-side data, connector grants, app-managed secrets).
+account access. Say that every bot's server-side conversation history and the bot's memory are exported daily by the routine.
+Mention what still cannot be backed up (README "Limits": the bot's own main chat, other bots' private memory, connector grants, app-managed secrets).
 
 ## Day-to-day commands
 | need | command |
 |---|---|
 | health | `./status.sh --local` (no network), `./status.sh` (full) |
+| server export status | `python3 server-export-merge.py next` (`{}` = complete), `staging/server-export/INDEX.md` |
 | acknowledge handled alerts | `./status.sh --ack` |
 | list / browse snapshots | `./restore.sh list`, `./restore.sh ls latest [path]` |
 | restore into a new dir | `./restore.sh <id\|latest> [path...]` -> `/workspace/restore-<date>-<id>/` |

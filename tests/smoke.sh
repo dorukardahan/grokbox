@@ -191,5 +191,36 @@ pid1=$(cat "$TMP/state/scheduler.pid")
 "$REPO_DIR/status.sh" --local >"$TMP/status.out" 2>&1 || true
 check "scheduler stopped" grep -q 'Scheduler: NOT running' "$TMP/status.out"
 
+step "server-export-merge.py (synthetic ReadTranscript / RecallMemory fixtures)"
+SE="$TMP/server-export"; FX="$TMP/se-fixtures"; mkdir -p "$FX" "$TMP/se-agents/tid-1"
+echo '{"name":"Test Bot"}' > "$TMP/se-agents/tid-1/profile.json"
+# page A B N MSG... -> a ReadTranscript result file (header, JSON lines, footer)
+page() { local a=$1 b=$2 n=$3; shift 3; {
+  printf 'Transcript of agent "Test Bot" (tid-1), positions %s\xe2\x80\x93%s of %s:\n\n' "$a" "$b" "$n"
+  for m in "$@"; do printf '{"role":"user","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$m"; done
+  [[ $a -gt 0 ]] && printf '\nOlder messages remain: call ReadTranscript again with the same in and before=%s.\n' "$a"; true; }; }
+sem() { SERVER_EXPORT_DIR="$SE" AGENTS_DIR="$TMP/se-agents" python3 "$REPO_DIR/server-export-merge.py" "$@"; }
+texts() { python3 -c 'import sys,json;print(" ".join(json.loads(l)["message"]["content"][0]["text"] for l in open(sys.argv[1]) if l.strip()))' "$SE"/transcripts/tid-1__*.jsonl; }
+page 6 9 10 m6 m7 m8 m9 > "$FX/p2.txt"; page 0 2 10 m0 m1 m2 > "$FX/p0.txt"; page 3 5 10 m3 m4 m5 > "$FX/p1.txt"
+out=$(sem ingest "$FX/p2.txt" "$FX/p0.txt"); check "a gap is reported as the next before value" test "$out" = '{"tid-1": 6}'
+out=$(sem ingest "$FX/p1.txt"); check "filling the gap completes the transcript" test "$out" = '{}'
+check "transcript stitched oldest-first" test "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9"
+sum1=$(sha256sum "$SE"/transcripts/*.jsonl | cut -d' ' -f1)
+sem ingest "$FX/p0.txt" "$FX/p1.txt" "$FX/p2.txt" >/dev/null
+check "re-ingesting the same pages is a no-op" test "$(sha256sum "$SE"/transcripts/*.jsonl | cut -d' ' -f1)" = "$sum1"
+page 8 12 13 m8 m9 m10 m11 m12 > "$FX/p3.txt"; sem ingest --remove "$FX/p3.txt" >/dev/null
+check "incremental newest page: overlap de-duplicated" test "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12"
+check "--remove deletes the result file" test ! -e "$FX/p3.txt"
+printf 'No conversation, agent, or subagent you can read from here has the id "tid-2".\n' > "$FX/u.txt"
+sem ingest --id tid-2 "$FX/u.txt" >/dev/null
+check "unreadable id recorded in INDEX.md" grep -q 'not readable' "$SE/INDEX.md"
+check "display name taken from the header / profile" grep -q '| Test Bot |' "$SE/INDEX.md"
+check "positions.json says complete (next = {})" test "$(sem next | tr -d ' \n')" = '{}'
+printf 'Top 50 matches for "a" in your memory (3 total):\n- (2026-01-01) [profile] fact one\n- (2026-01-02) [journal] fact two\n  wrapped\n' > "$FX/m1.txt"
+printf 'Top 50 matches for "b" in your memory (3 total):\n- (2026-01-01) [profile] fact one\n- (2026-01-03) [journal] fact three\n' > "$FX/m2.txt"
+sem memory "$FX/m1.txt" "$FX/m2.txt" >/dev/null; sem memory "$FX/m1.txt" >/dev/null
+check "memory facts de-duplicated (3 unique, wrapped line joined)" test "$(grep -c '^- (' "$SE/memory/primary-bot-and-shared.md")" = 3 -a "$(grep -c 'fact two wrapped' "$SE/memory/primary-bot-and-shared.md")" = 1
+check "export dirs are 700, files 600" test -z "$(find "$SE" -type d ! -perm 700; find "$SE" -type f ! -perm 600)"
+
 echo; echo "smoke test: $PASS_N passed, $FAIL_N failed"
 [[ $FAIL_N == 0 ]]
