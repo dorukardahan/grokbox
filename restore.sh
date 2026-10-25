@@ -20,21 +20,24 @@ Usage:
                                               of ANY host
   restore.sh --host NAME <any of the above>   use snapshots of host NAME instead of BACKUP_HOST
 
-`list` and `ls` only read the repository. A real restore takes state/backup.lock first and waits up
-to RESTORE_LOCK_WAIT (default 600 s) for a running backup or check to finish; while a restore runs,
-scheduled backups skip instead of competing for disk and bandwidth.
+`list` and `ls` only read the repository. A real restore takes state/backup.lock for the restic
+phase and waits up to RESTORE_LOCK_WAIT (default 600 s) for a running backup or check to finish;
+while that phase runs, scheduled backups skip instead of competing for disk and bandwidth. The lock
+is released before the optional --missing-only prompt and copy-back (a prompt may wait for a human
+answer for a long time, and the copy-back only touches live files, which the next backup picks up).
 
 If BACKUP_HOST has no snapshots at all, the script stops loudly and lists the hosts that do.
 
 Exit codes:
   0    ok (also: nothing to restore, or the --missing-only copy-back was declined)
-  1    the restore directory already exists
-  2    usage error
+  2    usage error (unknown option)
   3    missing credentials (restic password file / rclone config)
   4    BACKUP_HOST has no snapshots in this repository (host mismatch; see --host / --any-host)
+  5    the restore directory already exists (nothing is ever overwritten; wait a second or use
+       another snapshot id)
   7    repository unreachable, or the snapshot list cannot be read (Drive/auth/password problem)
   8    backup.lock stayed busy for RESTORE_LOCK_WAIT seconds (a backup or check is running; retry later)
-  any other code is the exit code of the restic call itself
+  9    the restic restore itself failed (the raw restic exit code is in the message and the log)
 EOF
 }
 case "${1:-}" in -h|--help|"") usage; exit 0;; esac
@@ -48,6 +51,9 @@ case "${1:-}" in
           BACKUP_HOST="$2"; HOSTARG=(--host "$BACKUP_HOST"); shift 2;;
 esac
 case "${1:-}" in -h|--help|"") usage; exit 0;; esac
+# reject unknown options BEFORE any repository access: the host guard below lists snapshots, and a
+# typo in the options must not surface as "repository unreachable" (7) during a Drive outage
+case "${1:-}" in list|ls) ;; -*) echo "unknown option ${1:-}" >&2; usage >&2; exit 2;; esac
 RTMP=""; trap '[[ -n "$RTMP" ]] && rm -rf "$RTMP" || true' EXIT   # private scratch (mktemp, 600)
 # --host guard for this box (a wrong name would silently restore nothing): needs the snapshot list
 if (( ${#HOSTARG[@]} )); then
@@ -81,7 +87,7 @@ while [[ "${1:-}" == --missing-only || "${1:-}" == --yes ]]; do
   [[ "$1" == --missing-only ]] && MISSING=1 || YES=1; shift; done
 [[ "$SNAP" == --* ]] && { echo "unknown option $SNAP" >&2; usage >&2; exit 2; }
 DEST="$RESTORE_BASE/restore-$(date +%Y%m%d-%H%M%S)-$SNAP"
-[[ -e "$DEST" ]] && { echo "exists: $DEST"; exit 1; }
+[[ -e "$DEST" ]] && { echo "exists: $DEST (never overwritten; wait a second or use another snapshot id)"; exit 5; }
 # a real restore writes a lot of scratch data: serialize with the backups (list/ls above skip this)
 exec 9>"$GB_STATE/backup.lock"
 if ! flock -w "${RESTORE_LOCK_WAIT:-600}" 9; then
@@ -93,9 +99,17 @@ INC=(); for p in "$@"; do INC+=(--include "$p"); done
 log "restore $SNAP ${*:-<all>} -> $DEST"
 rrc=0; R restore "$SNAP" "${HOSTARG[@]}" --target "$DEST" "${INC[@]}" --verify || rrc=$?
 if [[ "$rrc" != 0 ]]; then
-  alert "restic restore of $SNAP failed rc=$rrc (see $LOG); partial output may be in $DEST"
-  echo "ERROR: restic restore failed rc=$rrc (see $LOG); partial output may be in $DEST" >&2; exit "$rrc"; fi
+  # A persistent alert only when restic actually wrote something (a real partial restore); a wrong
+  # snapshot id fails before any output and would otherwise alert every day until --ack.
+  if [[ -e "$DEST" ]]; then
+    alert "restic restore of $SNAP failed rc=$rrc (see $LOG); partial output may be in $DEST"
+    echo "ERROR: restic restore failed rc=$rrc (see $LOG); partial output may be in $DEST" >&2
+  else
+    log "restic restore of $SNAP failed rc=$rrc: no output was written (wrong snapshot id?)"
+    echo "ERROR: restic restore failed rc=$rrc, no output was written (wrong snapshot id? see $LOG)" >&2; fi
+  exit 9; fi
 echo "Restored into $DEST (live files untouched)."
+exec 9>&-   # release backup.lock here: the --missing-only prompt below may wait for a human answer
 if [[ $MISSING == 1 ]]; then
   [[ -n "$RTMP" ]] || RTMP=$(mktemp -d "${TMPDIR:-/tmp}/grokbox-restore.XXXXXX")
   list="$RTMP/missing.list"   # NUL-delimited: any file name is safe

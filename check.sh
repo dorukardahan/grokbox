@@ -2,8 +2,14 @@
 # Daily: forget per retention policy (hourly `auto` chain + `quick` chain separately), verify, prune
 # repo structure + a random subset of data. Monthly (day 1) or --test-restore: real test restore.
 source "$(dirname "$0")/lib.sh"; need_creds
-"$GB_DIR/log-retention.sh" || true   # optional LOG_RETENTION_DAYS cleanup (default: logs kept forever)
-"$GB_DIR/quota-check.sh"   || true   # disk + Drive usage -> state/quota.status, alert at QUOTA_ALERT_PCT
+# Nightly housekeeping runs BEFORE the backup lock so it also runs on nights when a backup holds it,
+# but at most once a day: while the lock is busy the scheduler retries check.sh about every minute
+# (exit 75), and every retry must not re-query Drive (rclone about) or re-raise the quota alert.
+if [[ "$(cat "$GB_STATE/housekeeping-day" 2>/dev/null || true)" != "$(date +%F)" ]]; then
+  date +%F > "$GB_STATE/housekeeping-day"
+  "$GB_DIR/log-retention.sh" || true   # optional LOG_RETENTION_DAYS cleanup (default: logs kept forever)
+  "$GB_DIR/quota-check.sh"   || true   # disk + Drive usage -> state/quota.status, alert at QUOTA_ALERT_PCT
+fi
 exec 9>"$GB_STATE/backup.lock"
 flock -w "${LOCK_WAIT:-3600}" 9 || { log "check: backup lock busy; not run now (scheduler retries)"; exit 75; }
 took_lock check

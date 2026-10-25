@@ -351,9 +351,10 @@ rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" --json >"$TMP/doc.json" 2>&1 || rc=$
 check "--json: valid JSON with overall/exit/checks, same exit code" all test "$rc" = 2 --and-- python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d["overall"]=="PROBLEM" and d["exit"]==2 and any(c["name"]=="scheduler" and c["status"]=="PROBLEM" for c in d["checks"]) and len(d["checks"])>=10' "$TMP/doc.json"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/status.sh" --doctor --json >"$TMP/doc2.json" 2>&1 || rc=$?
 check "status.sh --doctor delegates (same JSON shape and exit code)" all test "$rc" = 2 --and-- python3 -c 'import json,sys;a=json.load(open(sys.argv[1]));b=json.load(open(sys.argv[2]));assert [c["name"] for c in a["checks"]]==[c["name"] for c in b["checks"]]' "$TMP/doc.json" "$TMP/doc2.json"
-# healthy: scheduler lock held by a live process, fresh heartbeat, fresh backup/check/test restore
+# healthy: scheduler lock held by a live process, fresh heartbeat, fresh backup/check/test restore/quota sample
 ( exec 7>>"$D/scheduler.lock"; flock 7; exec sleep 120 ) & SP=$!; sleep 1
 now_s > "$D/scheduler.heartbeat"; now_s > "$D/last-success"; now_s > "$D/last-check"; now_s > "$D/last-test-restore"
+printf 'drive_pct=20\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "healthy state: exit 0, Overall: OK, no WARN/PROBLEM lines" all test "$rc" = 0 --and-- grep -q '^Overall: OK' "$TMP/doc.out" --and-- not grep -qE '^(WARN|PROBLEM)' "$TMP/doc.out"
 check "one line per topic" bash -c 'for t in alerts scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"

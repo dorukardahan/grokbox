@@ -246,7 +246,11 @@ lock_problem() {
     fi
   fi
   if (( $(date +%s) - LOCK_TIME >= $(lock_budget_s) )); then
-    echo "backup.lock held for $(lock_age_h)h by: $LOCK_PID $LOCK_JOB (past job timeout plus grace)"
+    if [[ "$LOCK_JOB" == restore* ]]; then
+      echo "backup.lock held for $(lock_age_h)h by: $LOCK_PID restore (a restore has NO time limit, unlike backup/check; only a human should stop it - verify it is still making progress)"
+    else
+      echo "backup.lock held for $(lock_age_h)h by: $LOCK_PID $LOCK_JOB (past job timeout plus grace)"
+    fi
   fi
 }
 heartbeat_job_active() {

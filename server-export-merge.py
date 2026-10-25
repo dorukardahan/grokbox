@@ -27,7 +27,8 @@ Pages are stitched by the header range "positions A–B of N". A page that overl
 exported (the incremental case: newest page) is de-duplicated by matching the longest suffix of the
 exported file against the page's head (positions and lines are not 1:1: tool results can share a slot).
 
-Exit codes (check these, do not parse the stdout JSON to decide success):
+Exit codes (check these, do not parse the stdout JSON to decide success; in a bot's shell surface
+them, because `|| rc=$?` alone leaves the shell's own status 0: `... || rc=$?; echo "ingest_rc=$rc"`):
   ingest  0 = every result file was ingested (or was a no-op);
           3 = at least one page was REJECTED: invalid JSON lines, unreadable file, or no transcript
               header. The file is kept and its range is NOT recorded as exported (a rejected gap
@@ -133,6 +134,8 @@ def tfile(rec, tid):
     if len(have) > 1:
         repair_split(tid, have)
         have = sorted(glob.glob(os.path.join(TDIR, f"{tid}__*.jsonl")), key=os.path.getmtime)
+        if have:
+            rec['bytes'] = os.path.getsize(have[0])   # merged size: keep the length record in sync
     if have and have[0] != want:
         os.replace(have[0], want)
     return want
@@ -172,10 +175,10 @@ def repair(pos):
         if len(have) > 1:
             n = repair_split(tid, have)
             rec['lines'] = n
+            rec['bytes'] = os.path.getsize(tfile(rec, tid))   # merged size: keep the record in sync
             rec['warnings'] = [w for w in rec.get('warnings', []) if 'matched no lines' not in w]
             rec.setdefault('notes', []).append(
                 f"{time.strftime('%F %T%z')}: repaired split history ({len(have)} files merged, overlap removed)")
-            tfile(rec, tid)
 
 
 def stitch(pos, tid):
@@ -207,8 +210,24 @@ def stitch(pos, tid):
                     rec.setdefault('warnings', []).append(
                         f"{time.strftime('%F %T%z')}: overlap {a}-{M} matched no lines; appended page whole")
                 new = new[k:]
-                # rewrite via temp file + fsync + rename: head lines must be dropped, and a crash
-                # never leaves a half-written line (max_pos is only advanced after the rename)
+                rewrite = True
+            elif rec.get('bytes') is not None and os.path.exists(path) and os.path.getsize(path) == rec['bytes']:
+                # exact continuation of what is exported: append in place (single write + fsync)
+                # instead of rewriting the whole file, so paging back through a long backlog is linear
+                buf = ''.join(l + '\n' for l in new).encode('utf-8')
+                with open(path, 'ab') as fh:
+                    fh.write(buf); fh.flush(); os.fsync(fh.fileno())
+                os.chmod(path, 0o600)
+                rewrite = False
+            else:
+                # first page, or the file does not match the recorded length rec['bytes'] (the size
+                # after the last completed write): a kill/ENOSPC during the in-place append can leave
+                # a half-written line, so cut back to the recorded length and rewrite via temp file +
+                # fsync + rename (max_pos/bytes are only advanced after the rename)
+                if os.path.exists(path) and rec.get('bytes') is not None:
+                    os.truncate(path, rec['bytes'])
+                rewrite = True
+            if rewrite:
                 tmp = path + '.tmp'
                 with open(tmp, 'w', encoding='utf-8') as fh:
                     if os.path.exists(path):
@@ -216,13 +235,7 @@ def stitch(pos, tid):
                     for l in new: fh.write(l + '\n')
                     fh.flush(); os.fsync(fh.fileno())
                 os.chmod(tmp, 0o600); os.replace(tmp, path)
-            else:
-                # exact continuation of what is exported: append in place (single write + fsync)
-                # instead of rewriting the whole file, so paging back through a long backlog is linear
-                buf = ''.join(l + '\n' for l in new).encode('utf-8')
-                with open(path, 'ab') as fh:
-                    fh.write(buf); fh.flush(); os.fsync(fh.fileno())
-                os.chmod(path, 0o600)
+            rec['bytes'] = os.path.getsize(path)
             rec['lines'] = rec.get('lines', 0) + len(new)
             rec['max_pos'] = b
             rec['last_export'] = time.strftime('%F %T%z')

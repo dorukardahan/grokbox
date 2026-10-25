@@ -23,6 +23,8 @@ for a in "$@"; do case "$a" in
 if [[ $FORCE_RESTART == 1 ]]; then
   [[ $RESTART == 1 && $STOP == 0 && $INIT == 0 ]] || { echo "--force requires --restart-scheduler only"; exit 2; }
   lock_busy || { echo "backup.lock is free; refusing --force (use --restart-scheduler)"; exit 1; }
+  if lock_record && [[ "${LOCK_JOB:-}" == restore* ]]; then
+    echo "backup.lock is held by restore.sh (pid $LOCK_PID): a restore has no time limit, so --force refuses to kill it. Wait for it or stop it by hand." >&2; exit 1; fi
   python3 "$GB_DIR/lock-control.py" force "$GB_STATE/backup.lock" || exit 1
 fi
 chmod +x "$GB_DIR"/*.sh "$GB_DIR"/*.py "$GB_DIR"/rebuild-kit/*.sh "$GB_DIR"/tests/*.sh 2>/dev/null || true

@@ -109,16 +109,21 @@ PY
   else row PROBLEM "drive auth" "rclone config has no token for remote [$GB_REMOTE]: run ./auth-gdrive.sh"; fi
 fi
 
-# --- quota / disk (state/quota.status, written by the quota monitor if present)
+# --- quota / disk (state/quota.status, written once a day by quota-check.sh during the daily check)
 q="$GB_STATE/quota.status"
+qp="${QUOTA_ALERT_PCT:-90}"; [[ "$qp" =~ ^[0-9]+$ ]] || qp=90; qp=$((10#$qp))
 dpct=$(kv_num "$q" drive_pct); kpct=$(kv_num "$q" disk_pct); qt=$(kv_epoch "$q" time); kpath=$(kv_get "$q" disk_path | cut -c1-80)
-if isnum "$dpct" || isnum "$kpct"; then
+if ! isnum "$dpct" && ! isnum "$kpct"; then
+  row WARN "quota/disk" "unknown: no usable state/quota.status (written daily by quota-check.sh) - Drive/disk usage cannot be seen"
+elif isnum "$qt" && (( now - qt >= 48 * 3600 )); then
+  row WARN "quota/disk" "measured $(ago "$qt"): stale (no quota check for 2+ days, expected daily) - is the daily check running?"
+else
   det="Drive ${dpct:-?}% used, local disk ${kpct:-?}% used${kpath:+ ($kpath)}, measured $(ago "$qt")"
   worst=0; isnum "$dpct" && worst=$dpct; isnum "$kpct" && (( kpct > worst )) && worst=$kpct
-  if (( worst >= 90 )); then row PROBLEM "quota/disk" "$det: nearly full (90%+): free space or a bigger plan, else backups will fail"
+  if (( worst >= qp )); then row PROBLEM "quota/disk" "$det: nearly full (${qp}%+): free space or a bigger plan, else backups will fail"
   elif (( worst >= 80 )); then row WARN "quota/disk" "$det: getting full (80%+)"
   else row OK "quota/disk" "$det"; fi
-else row OK "quota/disk" "unknown (no state/quota.status yet; written by the quota monitor)"; fi
+fi
 
 # --- test restore (state/test-restore.result from test-restore.sh, else state/last-test-restore)
 tr="$GB_STATE/test-restore.result"

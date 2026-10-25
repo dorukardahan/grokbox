@@ -5,7 +5,9 @@
 TERM, waits up to 10 seconds, then sends KILL to remaining processes before
 queuing the restart. Linux pidfds pin process identities, so PID reuse cannot
 redirect signals. Inherited lock descriptors and escaped child process groups
-are included. A free lock or an unverifiable holder is refused. This is an
+are included. A free lock or an unverifiable holder is refused, and so is a lock
+held by `restore.sh`: restores have no timeout, so only the human who started one
+should stop it. This is an
 emergency action: inspect status, and use it only past the job timeout plus grace
 or when the heartbeat is stale for more than two hours.
 

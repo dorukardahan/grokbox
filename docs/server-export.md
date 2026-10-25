@@ -12,7 +12,7 @@ The script takes a lock, so both bots may run it at the same time.
 | path | what |
 |---|---|
 | `transcripts/<agent-id>__<slug>.jsonl` | one conversation, oldest first, one JSON message per line |
-| `state/positions.json` | per id: name, server total, highest exported position, lines, last export, pending pages, warnings |
+| `state/positions.json` | per id: name, server total, highest exported position, exported byte length, lines, last export, pending pages, warnings |
 | `state/pending/<id>/<A>-<B>.jsonl` | pages not yet contiguous with what is exported |
 | `INDEX.md` | name, id, counts, last export, status (`complete`, `empty`, `not readable`, `gap`) |
 | `memory/<name>.md` | deduplicated RecallMemory facts per bot (`grokbox-main-and-shared`, `grokbox-assist-and-shared`, `primary-bot-private`); only grows |
@@ -26,9 +26,11 @@ Set `SERVER_EXPORT_DIR` to write elsewhere and `AGENTS_DIR` if the agents live s
 and you page back with `before=A`. Positions and lines are not 1:1 (several tool results can share one
 position), so the script stitches pages by position range and de-duplicates an overlapping page by
 matching the longest suffix of the exported file against the page's head. Re-ingesting a page is a no-op,
-so an interrupted run can be repeated. Pending pages and the transcript file are written atomically
-(temp file + fsync + rename, or a single fsynced append for a page that continues the export exactly),
-so an interrupted run never leaves a half-written page behind.
+so an interrupted run can be repeated. Pending pages are written atomically (temp file + fsync +
+rename). The transcript file is either appended in place with one fsynced write (a page that continues
+the export exactly) or rewritten via temp file + rename; the exported byte length is recorded in
+`positions.json`, and the next run first cuts the file back to that recorded length, so a run killed
+mid-write never leaves a half-written line or a duplicated page behind.
 
 ## Daily routines
 The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + export of all bots) and
@@ -36,20 +38,24 @@ The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + expo
 [../AGENTS.md](../AGENTS.md) step 8. The export loop both use:
 1. Call `ReadTranscript {in: <id>, limit: 200}` for each id to export (newest page), in parallel, `write_to_file: true`.
 2. `python3 <repo>/server-export-merge.py ingest --remove <result files>` — **check the exit code, not
-   the printed JSON** (`rc=0; python3 ... || rc=$?`). Exit 0 = every page was ingested; the printed
-   `{id: before}` then says what to fetch next, `{}` = everything complete. Exit 3 = at least one page
-   was rejected (invalid JSON lines, unreadable, or no transcript header): the file is kept, its range
-   is NOT recorded as exported. Refetch each rejected id with a smaller page (`limit: 100`, then
-   `limit: 50`): `before=<value>` if the JSON output lists one for that id, otherwise its newest page
-   (a rejected newest page leaves `{}` in the output — the exit code is the only signal). If the
-   retry is rejected too, skip that id for today and report it in the run report. Nothing is lost:
-   tomorrow's run always fetches the newest page again, and a rejected gap keeps reappearing in
-   `next`'s output. For a result that says "No conversation ... has the id", ingest it with
-   `--id <id>` so it is recorded as not readable.
+   the printed JSON**. In a bot's shell the exit code must be made visible, because `|| rc=$?` alone
+   leaves the shell's own status 0:
+   `rc=0; python3 <repo>/server-export-merge.py ingest --remove <files> || rc=$?; echo "ingest_rc=$rc"`.
+   `ingest_rc=0` = every page was ingested; the printed
+   `{id: before}` then says what to fetch next, `{}` = everything complete. `ingest_rc=3` = at least
+   one page was rejected (invalid JSON lines, unreadable, or no transcript header): the file is kept,
+   its range is NOT recorded as exported. Refetch each rejected id with a smaller page (`limit: 100`,
+   then `limit: 50`): `before=<value>` if the JSON output lists one for that id, otherwise its newest
+   page (a rejected newest page leaves `{}` in the output — the exit code is the only signal). Once a
+   refetch reports `ingest_rc=0`, delete the rejected result file it replaces (a kept rejected file
+   makes every later ingest exit 3 again). If the retry is rejected too, skip that id for today and
+   report it in the run report. Nothing is lost: tomorrow's run always fetches the newest page again,
+   and a rejected gap keeps reappearing in `next`'s output. For a result that says "No conversation
+   ... has the id", ingest it with `--id <id>` so it is recorded as not readable.
 3. For each `id: N` call `ReadTranscript {in: id, limit: 200, before: N}` (`"newest"`: without `before`),
-   then ingest again (step 2, exit 0 = round done). Repeat until exit 0 and `{}`. For long backlogs
-   you may fire `before: N, N-35, N-70, ...` in parallel; overlaps are de-duplicated and any gap
-   reappears in the output.
+   then ingest only those new result files (step 2). Repeat until `ingest_rc=0` and `{}`. For long
+   backlogs you may fire `before: N, N-35, N-70, ...` in parallel; overlaps are de-duplicated and any
+   gap reappears in the output.
 4. `RecallMemory` with generic queries, then
    `server-export-merge.py memory --remove --out <bot>-and-shared --label <bot> <files>` (at most ~15 facts per query).
    Use `write_to_file: true` if the tool offers it. Some bots' RecallMemory has no such option and returns the

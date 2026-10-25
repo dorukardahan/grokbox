@@ -30,15 +30,18 @@ do not change other bots' settings, routines or memory.
 
 1. Export GrokBox-Main and the primary chat: call ReadTranscript {in: <MAIN_ID>, limit: 200} and
    ReadTranscript {in: <PRIMARY_ID>, limit: 200}, then
-   rc=0; python3 <REPO>/server-export-merge.py ingest --remove <result files> || rc=$?
-   Judge the run by rc, never by the printed JSON. rc=3 means a page was rejected (kept, not
-   ingested): refetch that id with a smaller page (limit: 100, then 50) - before=<value> if the
-   JSON lists one for that id, otherwise its newest page (a rejected newest page leaves {} in the
-   output). A page rejected twice is skipped today, its result file deleted, and reported
+   rc=0; python3 <REPO>/server-export-merge.py ingest --remove <result files> || rc=$?; echo "ingest_rc=$rc"
+   Judge the run by the printed ingest_rc line, never by the JSON. ingest_rc=3 means a page was
+   rejected (kept, not ingested): refetch that id with a smaller page (limit: 100, then 50) -
+   before=<value> if the JSON lists one for that id, otherwise its newest page (a rejected newest
+   page leaves {} in the output) - and ingest the refetched file; once that reports ingest_rc=0,
+   delete the rejected file it replaces (a kept rejected file makes every later ingest exit 3
+   again). A page rejected twice is skipped today, both result files deleted, and reported
    ("<id>: transcript page rejected twice"). Tomorrow's run fetches the newest page again, so
    nothing is lost.
    For each "id": N it prints, call ReadTranscript {in: id, limit: 200, before: N} ("newest": without before)
-   and ingest again, until rc=0 and it prints {} (at most 30 rounds). Only follow ids <MAIN_ID> and
+   and ingest only those new files, until ingest_rc=0 and it prints {} (at most 30 rounds). Only
+   follow ids <MAIN_ID> and
    <PRIMARY_ID>; other ids in the output are Main's job (step 3 checks them).
 2. Memory: RecallMemory with 3-5 generic queries ("user preferences", "projects", "decisions", "this week"),
    then: python3 <REPO>/server-export-merge.py memory --remove --out grokbox-assist-and-shared --label GrokBox-Assist <files>
