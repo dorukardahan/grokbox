@@ -156,6 +156,18 @@ check "age: a never-exported id fails (exit 1)" test "$(rc_of sem age bot-t1 bot
 check "no subcommand -> usage, exit 2" test "$(rc_of sem)" = 2
 check "unknown subcommand -> usage, exit 2" test "$(rc_of sem bogus)" = 2
 
+# An overlapping retry must also discard a partial append before reading the transcript tail.
+mkdir -p "$TMP/se-agents/bot-t4"
+echo '{"name":"Test Bot"}' > "$TMP/se-agents/bot-t4/profile.json"
+page bot-t4 0 2 3 m0 m1 m2 > "$FX/partial0.txt"
+check "overlap recovery: first page ingests (exit 0)" test "$(rc_of sem ingest "$FX/partial0.txt")" = 0
+printf '%s' '{"role":"user","message":{"content":[{"type":"text","text":"m3"}' >> "$(tfile bot-t4)"
+page bot-t4 1 4 5 m1 m2 m3 m4 > "$FX/partial-overlap.txt"
+check "overlapping page heals a half-written append (exit 0)" test "$(rc_of sem ingest "$FX/partial-overlap.txt")" = 0
+check "...overlap fragment removed, no duplicates" test "$(texts bot-t4)" = "m0 m1 m2 m3 m4"
+check "...every overlap recovery line is valid JSON" python3 -c 'import json,sys;[json.loads(l) for l in open(sys.argv[1])]' "$(tfile bot-t4)"
+check "...overlap recovery leaves no .tmp files" test -z "$(find "$SE" -name '*.tmp')"
+
 step "restore.sh --help, exit codes, private temp, backup.lock"
 rc=0; GB_CONFIG=/nonexistent/config "$REPO_DIR/restore.sh" --help >"$TMP/h.out" 2>&1 || rc=$?
 check "--help works with no config at all (before lib.sh/need_creds), exit 0" test "$rc" = 0

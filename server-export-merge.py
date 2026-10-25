@@ -200,6 +200,11 @@ def stitch(pos, tid):
             if a > M + 1:
                 continue
             new = [l for l in open(f, encoding='utf-8').read().split('\n') if l]
+            # A kill/ENOSPC during an append can leave a partial line. Cut back to the size
+            # after the last completed write before reading the overlap tail or copying the file.
+            # Never extend a file that is shorter than the recorded length.
+            if rec.get('bytes') is not None and os.path.exists(path) and os.path.getsize(path) > rec['bytes']:
+                os.truncate(path, rec['bytes'])
             if a <= M:  # overlap: drop the head lines already exported
                 tail = []
                 if os.path.exists(path):
@@ -220,12 +225,8 @@ def stitch(pos, tid):
                 os.chmod(path, 0o600)
                 rewrite = False
             else:
-                # first page, or the file does not match the recorded length rec['bytes'] (the size
-                # after the last completed write): a kill/ENOSPC during the in-place append can leave
-                # a half-written line, so cut back to the recorded length and rewrite via temp file +
-                # fsync + rename (max_pos/bytes are only advanced after the rename)
-                if os.path.exists(path) and rec.get('bytes') is not None:
-                    os.truncate(path, rec['bytes'])
+                # first page, unknown length, or a shorter file: rewrite via temp file + fsync +
+                # rename (max_pos/bytes are only advanced after the rename)
                 rewrite = True
             if rewrite:
                 tmp = path + '.tmp'
