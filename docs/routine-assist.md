@@ -30,10 +30,19 @@ do not change other bots' settings, routines or memory.
 
 1. Export GrokBox-Main and the primary chat: call ReadTranscript {in: <MAIN_ID>, limit: 200} and
    ReadTranscript {in: <PRIMARY_ID>, limit: 200}, then
-   python3 <REPO>/server-export-merge.py ingest --remove <result files>
+   rc=0; python3 <REPO>/server-export-merge.py ingest --remove <result files> || rc=$?; echo "ingest_rc=$rc"
+   Judge the run by the printed ingest_rc line, never by the JSON. ingest_rc=3 means a page was
+   rejected (kept, not ingested): refetch that id with a smaller page (limit: 100, then 50) -
+   before=<value> if the JSON lists one for that id, otherwise its newest page (a rejected newest
+   page leaves {} in the output) - and ingest the refetched file; once that reports ingest_rc=0,
+   delete the rejected file it replaces (a kept rejected file makes every later ingest exit 3
+   again). A page rejected twice is skipped today, both result files deleted, and reported
+   ("<id>: transcript page rejected twice"). Tomorrow's run fetches the newest page again, so
+   nothing is lost.
    For each "id": N it prints, call ReadTranscript {in: id, limit: 200, before: N} ("newest": without before)
-   and ingest again, until it prints {} (at most 30 rounds). Only follow ids <MAIN_ID> and <PRIMARY_ID>;
-   other ids in the output are Main's job (step 3 checks them).
+   and ingest only those new files, until ingest_rc=0 and it prints {} (at most 30 rounds). Only
+   follow ids <MAIN_ID> and
+   <PRIMARY_ID>; other ids in the output are Main's job (step 3 checks them).
 2. Memory: RecallMemory with 3-5 generic queries ("user preferences", "projects", "decisions", "this week"),
    then: python3 <REPO>/server-export-merge.py memory --remove --out grokbox-assist-and-shared --label GrokBox-Assist <files>
    If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
@@ -46,6 +55,13 @@ do not change other bots' settings, routines or memory.
 3. Scheduler self-heal + health, EVERY run (not only when Main missed its run):
    cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat state/ALERT 2>/dev/null
    (install.sh --schedule is a no-op when the scheduler runs; after a box move it starts it again.)
+    Lock recovery: the timeout normally ends hung jobs automatically (TERM, then KILL after 60 seconds).
+    Use ./install.sh --restart-scheduler --force only when the lock age exceeds
+    RESTIC_TIMEOUT_BACKUP plus grace (for check jobs, allow the sequential check/prune timeout budget),
+    or the scheduler heartbeat is stale by more than 2 hours. Inspect status.sh --local first.
+    Force verifies the actual lock descriptors and terminates that job and its children, including escaped
+    rclone process groups; it refuses a free or unverifiable lock. Never repeatedly force an active upload.
+    Auth re-consent exit 75 means the lock is busy: retry in a few minutes.
    Then: did Main run today? python3 <REPO>/server-export-merge.py age --max-hours 26 <ASSIST_ID>
    (Main exports this bot every run, so this is the age of Main's last export).
    - Exit 1 from age (Main's export is older than 26 h): Main missed its run. Do Main's routine yourself

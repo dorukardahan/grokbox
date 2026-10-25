@@ -48,7 +48,14 @@ A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
       Do not try to fix tokens yourself.
     - "stale-computer guard" (exit 4): do NOT force. Tell the owner; compare with ./restore.sh ls latest.
     - "backup.lock held for Nh" or "Scheduler loop has not ticked": a job is hung. Tell the owner; the
-      fix is ./install.sh --restart-scheduler (it waits for the lock, so it never interrupts a backup).
+      safe restart is ./install.sh --restart-scheduler (waits for the lock).
+    Lock recovery: the timeout normally ends hung jobs automatically (TERM, then KILL after 60 seconds).
+    Use ./install.sh --restart-scheduler --force only when the lock age exceeds
+    RESTIC_TIMEOUT_BACKUP plus grace (for check jobs, allow the sequential check/prune timeout budget),
+    or the scheduler heartbeat is stale by more than 2 hours. Inspect status.sh --local first.
+    Force verifies the actual lock descriptors and terminates that job and its children, including escaped
+    rclone process groups; it refuses a free or unverifiable lock. Never repeatedly force an active upload.
+    Auth re-consent exit 75 means the lock is busy: retry in a few minutes.
     - To test the Drive login without changing anything: ./auth-gdrive.sh --test
     - Any other alert: one line each, with the likely cause.
     Only run ./status.sh --ack after the cause is fixed AND the owner has been told.
@@ -56,11 +63,20 @@ A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
 PART B - server-side export of all bots (staging/server-export)
 B1. For every directory name <id> in <AGENTS_DIR> (skip files such as *.json), EXCEPT <MAIN_ID> (yourself;
     GrokBox-Assist exports you), call ReadTranscript {in: <id>, limit: 200} (newest page). Run them in parallel.
-B2. Run: python3 <REPO>/server-export-merge.py ingest --remove <all result files>
+B2. Run: rc=0; python3 <REPO>/server-export-merge.py ingest --remove <the result files of this round> || rc=$?; echo "ingest_rc=$rc"
     Ingest a result that says "No conversation ... has the id" on its own, with --id <id>.
-    It prints JSON {id: before}; {} means everything is complete.
+    ALWAYS judge the run by the printed ingest_rc line, never by the printed JSON. ingest_rc=0: the
+    JSON {id: before} says what to fetch next; {} means everything is complete. ingest_rc=3: at least
+    one page was rejected (the ERROR lines name the file; it is kept, not ingested). Refetch each
+    rejected id with a SMALLER page (limit: 100, then limit: 50): before=<value> if the JSON lists
+    one for that id, otherwise its newest page (a rejected newest page leaves {} in the output).
+    Once the refetch reports ingest_rc=0, delete the rejected result file it replaces (a kept
+    rejected file makes every later ingest exit 3 again). A page rejected twice: skip that id
+    today, delete both result files, and report "<id>: transcript page rejected twice" to the
+    owner. Nothing is lost: tomorrow's run fetches every newest page again.
 B3. For each "id": N call ReadTranscript {in: id, limit: 200, before: N}; for "id": "newest" call it without
-    before. Ingest again (B2). Repeat until it prints {}. For a long backlog you may also request
+    before. Ingest only those new result files (B2). Repeat until ingest_rc=0 and the JSON prints {}.
+    For a long backlog you may also request
     before = N-35, N-70, ... in parallel (overlaps are de-duplicated, gaps reappear). Stop after 30 rounds
     and report if not done.
 B4. Memory: call RecallMemory with about 10 generic queries ("user preferences", "projects", "bots and agents",

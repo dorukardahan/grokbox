@@ -3,15 +3,14 @@
 # test restore, scheduler, snapshot counts and repo size. Ends with `Overall: OK | ATTENTION NEEDED`.
 #   status.sh          full status (talks to the repository)
 #   status.sh --local  no network (fast; for watchdogs)
-#   status.sh --ack    acknowledge alerts: moves state/ALERT to logs/alerts-acked.log
+#   status.sh --ack    acknowledge alerts: moves state/ALERT to logs/alerts-acked.log (and starts a new alert
+#                      incident: the same alert text is recorded again if it recurs)
+#   status.sh --doctor [--online] [--json]   one-screen plain-language health check (runs doctor.sh)
 source "$(dirname "$0")/lib.sh"; set +e; trap - ERR
+[[ "${1:-}" == --doctor ]] && exec "$GB_DIR/doctor.sh" "${@:2}"
 R_TIMEOUT=300   # status must answer quickly even if Drive hangs
 ts(){ [[ -s "$1" ]] && date -d "@$(cat "$1")" '+%F %H:%M %Z' || echo never; }
-if [[ "${1:-}" == --ack ]]; then
-  if [[ -s "$GB_STATE/ALERT" ]]; then cat "$GB_STATE/ALERT" >> "$GB_LOGS/alerts-acked.log"; rm -f "$GB_STATE/ALERT"; echo "alerts acknowledged"
-  else echo "no alerts"; fi
-  exit 0
-fi
+if [[ "${1:-}" == --ack ]]; then alert_ack; exit 0; fi   # under state/alert.lock; also starts a new dedupe incident
 problems=0
 if [[ -s "$GB_STATE/ALERT" ]]; then
   problems=1
@@ -51,18 +50,20 @@ if lock_busy; then
   bp=$(pgrep -f "$GB_BIN/restic .* (backup|restore|prune|check|forget)" | head -1)
   if [[ -n "$bp" ]]; then echo "Running now: restic pid $bp for $(ps -o etime= -p "$bp" | tr -d ' ')"
   else echo "Running now: lock held (preparing)"; fi
-  la=$(lock_age_h)
-  if [[ -n "$la" ]] && (( la >= LOCK_ALERT_HOURS )); then
-    problems=1; echo "!! backup.lock held for ${la}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null) (hung job?)"; fi
+  problem=$(lock_problem)
+  if [[ -n "$problem" ]]; then problems=1; echo "!! $problem"; fi
 fi
 if sched_running; then
   echo "Scheduler: running (pid $(sched_pid))"
   hb=$(cat "$GB_STATE/scheduler.heartbeat" 2>/dev/null || echo "")
-  if [[ -n "$hb" ]] && ! lock_busy && (( $(date +%s) - hb >= ${HEARTBEAT_MAX_MIN:-90} * 60 )); then
+  if [[ "$hb" =~ ^[0-9]+$ ]] && ! heartbeat_job_active "$hb" && (( $(date +%s) - hb >= ${HEARTBEAT_MAX_MIN:-90} * 60 )); then
     problems=1; echo "!! Scheduler loop has not ticked for $(( ($(date +%s) - hb) / 60 )) min (hung?): ./install.sh --restart-scheduler"; fi
 else problems=1; echo "!! Scheduler: NOT running (run install.sh --schedule)"; fi
 if [[ ! -s "$RESTIC_PASSWORD_FILE" ]]; then problems=1; echo "!! credentials: restic password file missing ($RESTIC_PASSWORD_FILE); see AGENTS.md step 3"; fi
 if is_rclone_repo && [[ ! -s "$RCLONE_CONFIG" ]]; then problems=1; echo "!! credentials: rclone config missing ($RCLONE_CONFIG); run auth-gdrive.sh"; fi
+if [[ "$(kv_get "$GB_STATE/report-upload.status" result)" == failed ]]; then
+  problems=1; echo "!! Drive report: $([[ "$(kv_get "$GB_STATE/report-upload.status" stage)" == build ]] && echo build || echo upload) of latest-backup-report.txt FAILED at $(date -d "@$(kv_epoch "$GB_STATE/report-upload.status" time)" '+%F %H:%M %Z' 2>/dev/null || echo ?) (see $LOG; retried after the next hourly backup)"; fi
+if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then problems=1; echo "!! CHECK FAILED latch set: prune blocked until a passing integrity check"; fi
 if [[ -e "$SQLITE_LATCH" ]]; then problems=1; echo "!! SQLITE LATCH set ($(ts "$SQLITE_LATCH")): SQLite staging failed; forget/prune blocked until a fully successful hourly backup"; fi
 if [[ -s "$GB_STATE/last-success" ]]; then   # test restore: monthly, so allow 35 days (grace counted from first start)
   if [[ -s "$GB_STATE/last-test-restore" ]]; then

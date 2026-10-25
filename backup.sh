@@ -20,11 +20,21 @@ if [[ $DRY == 1 ]]; then   # private temp files: a dry run never touches shared 
 else
   exec 9>"$GB_STATE/backup.lock"
   if ! flock -w "$WAIT" 9; then
-    a=$(lock_age_h)
-    if [[ -n "$a" ]] && (( a >= LOCK_ALERT_HOURS )); then
-      alert "backup.lock held for ${a}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null) (hung job? restic calls time out after RESTIC_TIMEOUT_BACKUP=$RESTIC_TIMEOUT_BACKUP)"; fi
+    problem=$(lock_problem); [[ -z "$problem" ]] || alert "$problem"
     log "$MODE: another backup/check is running; skip"; exit 0; fi
   took_lock "$MODE"
+  if [[ $MODE == auto ]]; then
+    STARTED=$(date +%s); RESULT=failed; SNAPSHOT=""; FILES=0; BYTES=0; ADDED=0; UNREADABLE=0
+    # shellcheck disable=SC2329 # invoked by EXIT trap
+    write_backup_result() {
+      printf 'result=%s\ntime=%s\nsnapshot=%s\nfiles=%s\nbytes=%s\nadded=%s\nduration_s=%s\nunreadable=%s\n' \
+        "$RESULT" "$(date +%s)" "${SNAPSHOT:0:8}" "$FILES" "$BYTES" "$ADDED" "$(( $(date +%s) - STARTED ))" "$UNREADABLE" \
+        > "$GB_STATE/last-backup.result.tmp"
+      mv "$GB_STATE/last-backup.result.tmp" "$GB_STATE/last-backup.result"
+    }
+    trap write_backup_result EXIT
+    write_backup_result  # a hard kill must not leave the previous complete result authorizing prune
+  fi
   need_creds
 fi
 ROOTS=("${BACKUP_ROOTS[@]}"); [[ $MODE == quick ]] && ROOTS=("${QUICK_ROOTS[@]}")
@@ -113,22 +123,71 @@ if [[ $MODE == auto ]] && [[ ! -f "$inv" || -n "$(find "$inv" -mmin +1440)" ]]; 
 
 exclude_args
 read -r F B N < <(python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));print(d["files"],d["bytes"],d["newest_mtime"])' "$cur")
-TAGS=(--tag "$MODE" --tag "profile=$BACKUP_PROFILE" --tag "files=$F" --tag "bytes=$B" --tag "newest=$N")
+TAGS=(--tag incomplete --tag "profile=$BACKUP_PROFILE" --tag "files=$F" --tag "bytes=$B" --tag "newest=$N")
 log "backup start mode=$MODE profile=$BACKUP_PROFILE files=$F bytes=$B parent=${PARENT[1]:-none}"
 rc=0   # `|| rc=$?` keeps both errexit and the ERR trap quiet for restic's rc=3 (partial but valid snapshot)
-R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
-  "${PATHS[@]}" >>"$LOG" 2>&1 || rc=$?
-# restic: 0 ok, 3 = snapshot created but some files unreadable (still a good snapshot)
-if [[ $rc == 124 || $rc == 137 ]]; then alert "restic backup ($MODE) TIMED OUT after $RESTIC_TIMEOUT_BACKUP and was killed (rc=$rc); no new snapshot; the next run continues (already uploaded data is reused)"; exit "$rc"; fi
+events="$GB_LOGS/backup-$MODE.json.tmp"
+BACKUP_STARTED=$(date +%s)
+RESTIC_PROGRESS_FPS=0.01 R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --json --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
+  "${PATHS[@]}" >"$events" 2>&1 || rc=$?
+python3 - "$events" >> "$LOG" <<'PYLOG'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        entry = {}
+    if not isinstance(entry, dict) or entry.get('message_type') != 'status':
+        sys.stdout.write(line)
+PYLOG
+mapfile -t summary < <(python3 "$GB_DIR/backup-result.py" "$events" "$GB_STATE/unreadable-$MODE.json")
+SNAPSHOT="${summary[1]:-}"; FILES="${summary[2]:-0}"; BYTES="${summary[3]:-0}"; ADDED="${summary[4]:-0}"; UNREADABLE="${summary[5]:-0}"
+rm -f "$events"
+if [[ $rc == 124 || $rc == 137 ]]; then
+  RESULT=timeout
+  outcome="TIMED OUT"; ending="timed out and terminated"
+  if [[ $rc == 137 ]]; then
+    outcome="INTERRUPTED"
+    budget=$(python3 - "$RESTIC_TIMEOUT_BACKUP" <<'PYTIME'
+import re, sys
+m = re.fullmatch(r'(\d+(?:\.\d+)?)([smhd]?)', sys.argv[1])
+print(float(m[1]) * {'':1, 's':1, 'm':60, 'h':3600, 'd':86400}[m[2]] if m else 0)
+PYTIME
+)
+    ending="killed after timeout elapsed (possibly termination grace or external SIGKILL)"
+    if python3 - "$budget" "$(( $(date +%s) - BACKUP_STARTED ))" <<'PYTIME'
+import sys
+sys.exit(0 if float(sys.argv[1]) == 0 or float(sys.argv[2]) < float(sys.argv[1]) else 1)
+PYTIME
+    then ending="killed before the timeout elapsed (possible OOM or external SIGKILL)"; fi
+  fi
+  alert "restic backup ($MODE) $outcome (timeout limit $RESTIC_TIMEOUT_BACKUP): $ending (rc=$rc); interrupted uploads resume next run; prune waits for a complete hourly backup"
+  exit "$rc"
+fi
 if [[ $rc != 0 && $rc != 3 ]]; then alert "restic backup ($MODE) failed rc=$rc (see $LOG)"; exit "$rc"; fi
-if [[ $rc == 3 ]]; then   # snapshot exists but is incomplete: keep it, do not treat it as a good baseline
-  date +%s > "$GB_STATE/last-partial"
-  inc=$(R snapshots --host "$BACKUP_HOST" --tag "$MODE" --latest 1 --json 2>>"$LOG" \
-        | python3 -c 'import json,sys;s=sorted(json.load(sys.stdin),key=lambda x:x["time"]);print(s[-1]["id"] if s else "")' 2>>"$LOG" || true)
-  if [[ -n "$inc" ]] && R tag --add incomplete "$inc" >>"$LOG" 2>&1; then :
-  else alert "could not tag the incomplete snapshot ${inc:0:8}; the guard baseline may use it until it is tagged 'incomplete' by hand"; fi
-  alert "restic backup ($MODE) created an INCOMPLETE snapshot (some files unreadable, see $LOG); last-success and the guard baseline were NOT updated, forget skipped"
+if [[ $rc == 3 && "${summary[0]:-}" != warnings ]]; then
+  RESULT=incomplete; date +%s > "$GB_STATE/last-partial"
+  alert "restic backup ($MODE) created an INCOMPLETE snapshot; excluded from complete-snapshot retention (kept for 7 days); last-success unchanged. Unreadable paths (up to 20): ${summary[6]:-unknown; see log}"
   exit 6
+fi
+promoted=0
+if [[ -n "$SNAPSHOT" ]]; then
+  for attempt in 1 2; do
+    if R tag --remove incomplete --add "$MODE" "$SNAPSHOT" >>"$LOG" 2>&1; then promoted=1; break; fi
+    log "backup ($MODE): snapshot promotion attempt $attempt failed"
+  done
+fi
+if [[ $promoted != 1 ]]; then
+  RESULT=incomplete; date +%s > "$GB_STATE/last-partial"
+  alert "backup ($MODE): could not promote snapshot to complete; retention skipped"; exit 6
+fi
+# Tagging changes the snapshot id; prefer the promoted id when the lookup succeeds.
+if promoted_id=$(R snapshots --host "$BACKUP_HOST" --tag "$MODE" --latest 1 --json 2>>"$LOG" | python3 -c 'import json,sys;s=json.load(sys.stdin);print(s[-1]["short_id"] if s else "")') && [[ -n "$promoted_id" ]]; then
+  SNAPSHOT="$promoted_id"
+else log "backup ($MODE): promoted snapshot ID lookup failed; result retains pre-tag ID $SNAPSHOT"; fi
+RESULT=complete
+if [[ $rc == 3 ]]; then
+  log "backup ($MODE) complete with warnings: persistently unreadable regular files omitted (up to 20): ${summary[6]}"
 fi
 date +%s > "$GB_STATE/last-success-$MODE"
 if [[ $MODE == auto ]]; then
@@ -140,8 +199,12 @@ log "backup ok mode=$MODE rc=$rc"
 if [[ -n "$NO_FORGET_WHY" ]]; then log "forget skipped: $NO_FORGET_WHY"
 elif [[ -e "$GUARD_LATCH" ]]; then alert "forget skipped: stale guard latch ($GUARD_LATCH) is set"
 elif [[ -e "$SQLITE_LATCH" ]]; then alert "forget skipped: SQLite staging failed earlier ($SQLITE_LATCH is set; clears after a fully successful hourly backup)"
+elif [[ -e "$GB_STATE/CHECK_FAILED" ]]; then log "forget skipped: integrity check failure latch is set"
 elif [[ $FORGET == 1 && $MODE == auto ]]; then   # forget only; the actual prune happens daily in check.sh
-  RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
-  RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+  if prepare_retention; then
+    RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
+    RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+    RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
+  else alert "forget skipped: incomplete snapshot tags could not be repaired"; fi
 fi
 exit 0

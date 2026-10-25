@@ -6,6 +6,8 @@
 #   quick    every QUICK_EVERY_MIN min (not within 10 min after an hourly)   backup.sh --quick (skips if busy)
 #   once     after the first successful hourly           test-restore.sh (later monthly via check.sh)
 #   daily    from DAILY_CHECK_AT, once per day           check.sh (forget both chains + prune + check)
+#   weekly   TEST_RESTORE_WEEKDAY at TEST_RESTORE_AT    test-restore.sh --weekly (sample restore + sha256 compare)
+#   after hourly / check / test restore                  report.sh (latest-backup-report.txt -> Drive), expected-bots.sh
 #   hourly   from minute WATCHDOG_AT_MIN                 watchdog: ALERT if the last HOURLY success (or, before the first one,
 #                                                        the scheduler's first start) is >= ALERT_NO_SUCCESS_HOURS old
 # Jobs run one at a time in the foreground of this loop. `touch state/PAUSE` pauses new jobs.
@@ -20,6 +22,7 @@ SIG=$(sig)
 CHECK_H=$((10#${DAILY_CHECK_AT%%:*})); CHECK_M=$((10#${DAILY_CHECK_AT##*:}))
 # first start on a box: first daily check tomorrow (not right now, possibly during the first upload)
 [[ -s "$GB_STATE/sched-check" ]] || date +%F > "$GB_STATE/sched-check"
+[[ -s "$GB_STATE/sched-test-restore" ]] || test_restore_slot > "$GB_STATE/sched-test-restore"   # first weekly run: next slot
 mark_first_start
 log "scheduler started pid $$ (quick every ${QUICK_EVERY_MIN}m)"
 RC=0; run(){ RC=0; "$@" 8>&- || RC=$?; (( RC == 0 )) || log "scheduler: $(basename "$1") ${2:-} exited rc=$RC"; return 0; }
@@ -37,8 +40,9 @@ while true; do
   if (( m >= HOURLY_AT_MIN )) && [[ "$(get sched-backup)" != "$hour" ]]; then
     echo "$hour" > "$GB_STATE/sched-backup"; echo "$now" > "$GB_STATE/sched-backup-at"
     run "$GB_DIR/backup.sh" --wait 1200
+    run "$GB_DIR/report.sh"; run "$GB_DIR/expected-bots.sh" --alert   # Drive report + expected-bot roster (never block)
     if [[ -f "$GB_STATE/last-success" && ! -f "$GB_STATE/last-test-restore" && ! -f "$GB_STATE/test-restore-attempted" ]]; then
-      date +%s > "$GB_STATE/test-restore-attempted"; run "$GB_DIR/test-restore.sh"; fi
+      date +%s > "$GB_STATE/test-restore-attempted"; run "$GB_DIR/test-restore.sh"; run "$GB_DIR/report.sh"; fi
   elif (( QUICK_EVERY_MIN > 0 && now - $(get sched-quick-at) >= QUICK_EVERY_MIN * 60 - 30 \
           && now - $(get sched-backup-at) >= 600 )); then
     echo "$now" > "$GB_STATE/sched-quick-at"; run "$GB_DIR/backup.sh" --quick
@@ -46,6 +50,12 @@ while true; do
   if (( h > CHECK_H || (h == CHECK_H && m >= CHECK_M) )) && [[ "$(get sched-check)" != "$day" ]]; then
     echo "$day" > "$GB_STATE/sched-check"; LOCK_WAIT=60 run "$GB_DIR/check.sh"
     (( RC == 75 )) && rm -f "$GB_STATE/sched-check"   # a backup held the lock: retry next minute
+    (( RC == 75 )) || run "$GB_DIR/report.sh"
+  fi
+  if [[ -s "$GB_STATE/last-success" ]] && slot=$(test_restore_slot) && [[ -n "$slot" && "$(get sched-test-restore)" != "$slot" ]]; then
+    echo "$slot" > "$GB_STATE/sched-test-restore"; LOCK_WAIT=60 run "$GB_DIR/test-restore.sh" --weekly
+    (( RC == 75 )) && rm -f "$GB_STATE/sched-test-restore"   # lock busy: retry next minute
+    (( RC == 75 )) || run "$GB_DIR/report.sh"
   fi
   if (( m >= WATCHDOG_AT_MIN )) && [[ -s "$GB_STATE/last-success" || -s "$GB_STATE/first-start" ]] && [[ "$(get sched-watchdog)" != "$hour" ]]; then
     echo "$hour" > "$GB_STATE/sched-watchdog"
@@ -56,9 +66,8 @@ while true; do
       if ! lock_busy; then
         alert "no successful HOURLY snapshot for ${age_h}h ($what); check $LOG"
       else
-        la=$(lock_age_h)
-        if [[ -n "$la" ]] && (( la >= LOCK_ALERT_HOURS )); then
-          alert "no successful HOURLY snapshot for ${age_h}h and backup.lock is held for ${la}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null)"
+        problem=$(lock_problem)
+        if [[ -n "$problem" ]]; then alert "$problem"
         else log "watchdog: last hourly success ${age_h}h ago but a backup is running now"; fi
       fi
     fi

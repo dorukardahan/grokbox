@@ -56,7 +56,8 @@ Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md
 | every hour at :17 | full snapshot + brain export + SQLite copies + forget | `auto` | hourly 24, daily 30, weekly 12, monthly 12 |
 | every 15 min | quick snapshot, same roots/excludes (unchanged files are only stat'ed) | `quick` | everything of the last 24 h |
 | once, after the first hourly | `test-restore.sh` (real restore of a sample + checksum verify, then deleted) | | |
-| daily 04:40 | `check.sh`: forget both tags, prune, `restic check --read-data-subset 5%`; on day 1 of a month also a test restore | | |
+| weekly, Sunday 02:20 | `test-restore.sh --weekly` (critical files + sample, SHA-256 compare with live files); `TEST_RESTORE_WEEKDAY` / `TEST_RESTORE_AT` | | |
+| daily 04:40 | `check.sh`: forget by tag, `restic check --read-data-subset 5%`, then prune; on day 1 of a month also a test restore | | |
 | hourly :50 | watchdog: ALERT if no successful hourly snapshot for 3 h | | |
 
 The two tags are forgotten separately, so quick snapshots never disturb the long-term chain. One lock
@@ -69,24 +70,33 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   empty or old; a smaller or subtler rollback can pass. `backup.sh --force "reason"` overrides once (only after a human compared with
   `restore.sh ls latest`). A trip also sets the latch `state/GUARD_TRIPPED`: while it exists no forget/prune runs (backup, `check.sh`);
   only a successful hourly backup (including `--force`) clears it. `status.sh` shows it.
-- **Incomplete snapshots** (restic exit 3, unreadable files): the snapshot is kept, an alert is raised and `state/last-partial` is written,
-  but it is not treated as a good baseline (no `last-success`, no guard baseline update, no forget). `backup.sh` exits 6.
+- **Incomplete snapshots**: snapshots start tagged `incomplete` and gain `auto`/`quick` only on completion. Incomplete runs alert and exit 6 without updating the good baseline; their snapshots are excluded from complete-snapshot retention and kept separately for 7 days. Repeated identical unreadable regular-file permission errors complete with warnings in the log; new error sets alert again.
 - **SQLite staging failures** (failed/timed-out copy): alert; databases without a fresh copy are backed up live instead of being excluded, and forget is skipped for that run.
 - **Uptime + hydration guards**: no backup in the first 15 minutes after boot, or while the platform's hydration log says files are still being copied in.
 - **Consistent SQLite copies** of live databases (SQLite online-backup API) into `staging/sqlite/`, since copying live `.db` files is unsafe.
 - **Brain export**: indexes agent data directories and mirrors mounted agent stores (outside the roots) into `staging/brain/` with an `INDEX.md`.
 - **Time limits**: every restic call runs under `timeout -k` (`RESTIC_TIMEOUT` 3 h, `RESTIC_TIMEOUT_BACKUP` 12 h, `RESTIC_TIMEOUT_CHECK` 8 h),
-  so a hung Drive call cannot hold `state/backup.lock` forever; a killed run exits 124/137 and raises an alert. `state/lock-holder` records
-  who holds the lock since when; `status.sh` and the watchdog flag a lock held longer than `LOCK_ALERT_HOURS` (13 h).
+  a timed-out run exits 124/137 and raises an alert; orphaned children are reported for explicit recovery. `state/lock-holder` records
+  who holds the lock since when; alerts use job-specific timeout budgets (including sequential check work).
 - **Dead-man file**: the scheduler loop writes `state/scheduler.heartbeat` every minute; `status.sh` flags a loop that stopped
-  ticking (`HEARTBEAT_MAX_MIN`, 90 min) while no job holds the lock.
+  ticking (`HEARTBEAT_MAX_MIN`, 90 min), except during its own verified live job within the job timeout budget. Unrelated or orphaned locks do not hide a stale heartbeat.
 - **Drive trash for forget/prune** (`PRUNE_USE_TRASH=1`): repository files deleted by forget/prune go to the Drive trash
   (recoverable ~30 days; they count against the quota until Google empties the trash). Ordinary backups skip the trash.
   On by default; set `PRUNE_USE_TRASH=0` in `config.env` to delete at once instead.
-- **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. No e-mail is sent:
-  the box cannot send messages on its own. Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
+- **Capacity watch**: the nightly `check.sh` records local-disk and Drive-quota usage in `state/quota.status` and alerts
+  at `QUOTA_ALERT_PCT` (90%) full ([docs/capacity-and-logs.md](docs/capacity-and-logs.md)). Logs are kept forever by
+  default; set `LOG_RETENTION_DAYS` to delete old `logs/backup-*.log` files.
+- **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. The same
+  alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). No e-mail is sent by default: the box
+  cannot send messages on its own; an optional `ALERT_HOOK` command (mail, webhook) can be configured ([docs/health-and-alerts.md](docs/health-and-alerts.md)).
+  Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
   scheduler is noticed within a day.
+- **Health check, weekly test restore, Drive report, expected bots** ([docs/health-and-alerts.md](docs/health-and-alerts.md)): `./doctor.sh`
+  (or `status.sh --doctor`, `--json`) is one screen of OK / WARN / PROBLEM lines with exit 0/1/2; `test-restore.sh --weekly` restores a
+  sample plus the critical files every week and compares SHA-256 with the live files; `report.sh` uploads a small
+  `latest-backup-report.txt` next to the restic folder in Drive after every hourly backup; `EXPECTED_BOTS` lists bots that must be
+  in every server-side export.
 - **Optional second copy** (not set up by default): the Drive repository is the only copy. For a second one, use a restic repository on
   another provider and `restic copy` into it on a schedule (`restic -r <second> copy --from-repo rclone:<remote>:<folder>`); keep its
   password outside the box too.
@@ -112,6 +122,8 @@ cd /workspace/grokbox
 ./restore.sh --any-host list               # config.env lost / host renamed: all hosts (also --host NAME)
 ```
 If `BACKUP_HOST` has no snapshots at all, `restore.sh` stops with an error that lists the hosts that do.
+A real restore takes `state/backup.lock` (waits up to `RESTORE_LOCK_WAIT`); `list`/`ls` are read-only and skip it.
+`restore.sh --help` documents all exit codes.
 **Disaster on a fresh box**: see [REBUILD.md](REBUILD.md): clone, restore the password (`RESTIC_BACKUP_PASSWORD`) and the OAuth client JSON,
 `./auth-gdrive.sh`, `./restore.sh latest`, move folders back.
 
@@ -146,6 +158,17 @@ You must also keep **outside the box**: the restic password, the Google OAuth cl
 stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), status no-success flag, test restore, check, status, scheduler start/stop,
 restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked SQLite dedupe, and the server-export failure cases.
 
+## Runbooks
+See [docs/runbooks.md](docs/runbooks.md) for step-by-step procedures:
+- **Repository repair** (`restic check` failed: `repair index`, `repair packs`, `repair snapshots`, never prune during repair)
+- **Undo a bad prune from the Drive trash** (`PRUNE_USE_TRASH=1`: `rclone backend untrash` or Drive web UI, then `repair index` and `check`)
+- **Wrong host** (`BACKUP_HOST` mismatch: `restore.sh --any-host` / `--host`, `restic rewrite --new-host` and tag handling)
+
+For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.md](REBUILD.md).
+
+## CI
+[`ci/github-actions-ci.yml.example`](ci/github-actions-ci.yml.example) is a ready GitHub Actions workflow (copy it to `.github/workflows/ci.yml` to enable it) that runs `shellcheck` on all shell scripts and executes `tests/smoke.sh` plus any additional `tests/*.sh` suites on every push and pull request. `install.sh` verifies downloaded `restic` and `rclone` archives against both the repo-pinned [checksums.txt](checksums.txt) and upstream `SHA256SUMS`.
+
 ## Files
 | file | what |
 |---|---|
@@ -154,10 +177,14 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 | `install.sh` | idempotent setup; `--init`, `--schedule`, `--restart-scheduler`, `--stop-scheduler`, `--gen-password`, `--show-password` |
 | `auth-gdrive.sh` | Google Drive login for rclone (own OAuth client, or `--rclone-default-client`) |
 | `backup.sh` | hourly (`auto`) or `--quick`; guards, SQLite copies, brain export, forget; `--dry-run`, `--force "why"` |
-| `check.sh` | daily forget + prune + check; monthly test restore |
+| `check.sh` | daily forget + prune + check; monthly test restore; starts the capacity watch + log retention |
+| `quota-check.sh` / `log-retention.sh` | nightly housekeeping called by `check.sh` ([docs/capacity-and-logs.md](docs/capacity-and-logs.md)) |
 | `test-restore.sh` | real restore of a sample + checksum verification, then deleted |
 | `restore.sh` | `list`, `ls`, restore into a restore dir, `--missing-only` |
-| `status.sh` | alerts, last runs, scheduler, snapshots; `--local`, `--ack` |
+| `status.sh` | alerts, last runs, scheduler, snapshots; `--local`, `--ack`, `--doctor` |
+| `doctor.sh` | one-screen health check: OK / WARN / PROBLEM per topic, exit 0/1/2; `--online`, `--json` |
+| `report.sh` | writes `latest-backup-report.txt` and uploads it next to the restic folder in Drive (`DRIVE_REPORT`) |
+| `expected-bots.sh` | checks the `EXPECTED_BOTS` roster against the latest server-side export; `--alert` |
 | `scheduler.sh` | cron replacement loop; re-execs itself on code/config change |
 | `lib.sh` | shared helpers (config loading, alerts, exclude building, guards) |
 | `manifest.py` | file count / bytes / newest mtime for the guard |
@@ -174,8 +201,12 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |
 | `PRIVACY.md` | privacy policy (also used as the OAuth consent-screen policy URL) |
+| `docs/health-and-alerts.md` | doctor.sh, weekly test restore, alert dedupe + `ALERT_HOOK`, expected bots, Drive report |
 | `tests/smoke.sh` | local end-to-end test |
+| `tests/health.sh` | offline tests for doctor.sh, weekly test restore, alert dedupe/hook, expected bots, Drive report (fake rclone) |
 | `secrets/` (chmod 700), `state/`, `logs/`, `staging/`, `cache/`, `bin/` | runtime data, gitignored |
 
 ## License
 MIT, see [LICENSE](LICENSE). Privacy: [PRIVACY.md](PRIVACY.md).
+
+See [lock, interrupted-backup and consent recovery](docs/lock-and-prune-safety.md) for emergency restart and prune safeguards.

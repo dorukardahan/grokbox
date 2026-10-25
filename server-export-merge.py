@@ -5,8 +5,9 @@ ReadTranscript is a Grok Bot tool, not callable from cron, so a bot's daily rout
 GrokBox-Assist for Main's own conversation) pulls the pages (in=<id>, limit=200, write_to_file=true, paging back with `before`) and runs:
 
   server-export-merge.py ingest [--remove] CHUNK...   merge chunks (idempotent; re-ingest is a no-op).
-                                                     A chunk with an invalid JSON message line is NOT
-                                                     ingested (kept, exit 3), so no message is lost
+                                                     A chunk that cannot be trusted (invalid JSON message
+                                                     line, unreadable, or no transcript header) is NOT
+                                                     ingested (file kept, exit 3), so no message is lost
   server-export-merge.py next                         what to call next (JSON): per transcript the
                                                      `before` value still needed, or "newest"; {} = all complete
   server-export-merge.py index                        rewrite INDEX.md
@@ -25,6 +26,19 @@ Layout (dir 700, files 600):
 Pages are stitched by the header range "positions A–B of N". A page that overlaps what is already
 exported (the incremental case: newest page) is de-duplicated by matching the longest suffix of the
 exported file against the page's head (positions and lines are not 1:1: tool results can share a slot).
+
+Exit codes (check these, do not parse the stdout JSON to decide success; in a bot's shell surface
+them, because `|| rc=$?` alone leaves the shell's own status 0: `... || rc=$?; echo "ingest_rc=$rc"`):
+  ingest  0 = every result file was ingested (or was a no-op);
+          3 = at least one page was REJECTED: invalid JSON lines, unreadable file, or no transcript
+              header. The file is kept and its range is NOT recorded as exported (a rejected gap
+              reappears in `next`'s output; a rejected newest page does not — the exit code is the
+              only signal). Refetch that id with a smaller limit (a smaller page often survives what
+              truncated the first one) and re-ingest; report it if the retry is rejected too.
+  age     1 = an id was never checked or its last check is older than --max-hours.
+  all     2 = bad usage (unknown subcommand/flags). Anything else is an unexpected error.
+The JSON on stdout of `ingest`/`next` is always valid for the pages that WERE ingested; `{}` means
+"nothing missing" only when the exit code was 0.
 """
 import datetime, json, os, re, sys, time, unicodedata, glob, shutil
 
@@ -53,10 +67,16 @@ def load_pos():
     return json.load(open(POSF)) if os.path.exists(POSF) else {}
 
 
+def write_atomic(path, text):
+    """Write text to path via a temp file + fsync + rename: a crash never leaves a partial file."""
+    tmp = path + '.tmp'
+    with open(tmp, 'w', encoding='utf-8') as f:
+        f.write(text); f.flush(); os.fsync(f.fileno())
+    os.chmod(tmp, 0o600); os.replace(tmp, path)
+
+
 def save_pos(p):
-    tmp = POSF + '.tmp'
-    with open(tmp, 'w') as f: json.dump(p, f, indent=1, ensure_ascii=False, sort_keys=True)
-    os.replace(tmp, POSF)
+    write_atomic(POSF, json.dumps(p, indent=1, ensure_ascii=False, sort_keys=True))
 
 
 def canon(line):
@@ -114,6 +134,8 @@ def tfile(rec, tid):
     if len(have) > 1:
         repair_split(tid, have)
         have = sorted(glob.glob(os.path.join(TDIR, f"{tid}__*.jsonl")), key=os.path.getmtime)
+        if have:
+            rec['bytes'] = os.path.getsize(have[0])   # merged size: keep the length record in sync
     if have and have[0] != want:
         os.replace(have[0], want)
     return want
@@ -153,10 +175,10 @@ def repair(pos):
         if len(have) > 1:
             n = repair_split(tid, have)
             rec['lines'] = n
+            rec['bytes'] = os.path.getsize(tfile(rec, tid))   # merged size: keep the record in sync
             rec['warnings'] = [w for w in rec.get('warnings', []) if 'matched no lines' not in w]
             rec.setdefault('notes', []).append(
                 f"{time.strftime('%F %T%z')}: repaired split history ({len(have)} files merged, overlap removed)")
-            tfile(rec, tid)
 
 
 def stitch(pos, tid):
@@ -178,6 +200,11 @@ def stitch(pos, tid):
             if a > M + 1:
                 continue
             new = [l for l in open(f, encoding='utf-8').read().split('\n') if l]
+            # A kill/ENOSPC during an append can leave a partial line. Cut back to the size
+            # after the last completed write before reading the overlap tail or copying the file.
+            # Never extend a file that is shorter than the recorded length.
+            if rec.get('bytes') is not None and os.path.exists(path) and os.path.getsize(path) > rec['bytes']:
+                os.truncate(path, rec['bytes'])
             if a <= M:  # overlap: drop the head lines already exported
                 tail = []
                 if os.path.exists(path):
@@ -188,15 +215,28 @@ def stitch(pos, tid):
                     rec.setdefault('warnings', []).append(
                         f"{time.strftime('%F %T%z')}: overlap {a}-{M} matched no lines; appended page whole")
                 new = new[k:]
-            # atomic append: write old + new into a temp file, fsync, then rename over the original, so a
-            # crash never leaves a half-written line (and max_pos is only advanced after the rename)
-            tmp = path + '.tmp'
-            with open(tmp, 'w', encoding='utf-8') as fh:
-                if os.path.exists(path):
-                    with open(path, encoding='utf-8') as old: shutil.copyfileobj(old, fh)
-                for l in new: fh.write(l + '\n')
-                fh.flush(); os.fsync(fh.fileno())
-            os.chmod(tmp, 0o600); os.replace(tmp, path)
+                rewrite = True
+            elif rec.get('bytes') is not None and os.path.exists(path) and os.path.getsize(path) == rec['bytes']:
+                # exact continuation of what is exported: append in place (single write + fsync)
+                # instead of rewriting the whole file, so paging back through a long backlog is linear
+                buf = ''.join(l + '\n' for l in new).encode('utf-8')
+                with open(path, 'ab') as fh:
+                    fh.write(buf); fh.flush(); os.fsync(fh.fileno())
+                os.chmod(path, 0o600)
+                rewrite = False
+            else:
+                # first page, unknown length, or a shorter file: rewrite via temp file + fsync +
+                # rename (max_pos/bytes are only advanced after the rename)
+                rewrite = True
+            if rewrite:
+                tmp = path + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as fh:
+                    if os.path.exists(path):
+                        with open(path, encoding='utf-8') as old: shutil.copyfileobj(old, fh)
+                    for l in new: fh.write(l + '\n')
+                    fh.flush(); os.fsync(fh.fileno())
+                os.chmod(tmp, 0o600); os.replace(tmp, path)
+            rec['bytes'] = os.path.getsize(path)
             rec['lines'] = rec.get('lines', 0) + len(new)
             rec['max_pos'] = b
             rec['last_export'] = time.strftime('%F %T%z')
@@ -207,6 +247,7 @@ def stitch(pos, tid):
 
 
 def ingest(paths, remove=False, fallback_id=None):
+    """-> 0 when every file was ingested; 3 when at least one page was rejected (kept for a retry)."""
     for d in (BASE, TDIR, SDIR, PEND): os.makedirs(d, mode=0o700, exist_ok=True); os.chmod(d, 0o700)
     pos = load_pos()
     touched, failed = set(), []
@@ -215,8 +256,10 @@ def ingest(paths, remove=False, fallback_id=None):
             c = parse_chunk(p, fallback_id)
         except BadChunk as e:   # keep the file, do not record its range: the next run fetches it again
             failed.append(p); print(f"ERROR (not ingested, file kept): {p}: {e}", file=sys.stderr); continue
-        if not c:
-            print(f"SKIP (no transcript header): {p}", file=sys.stderr); continue
+        except OSError as e:
+            failed.append(p); print(f"ERROR (cannot read, not ingested): {p}: {e}", file=sys.stderr); continue
+        if not c:   # no transcript header and no --id: cannot be attributed to any transcript
+            failed.append(p); print(f"ERROR (not ingested, file kept): {p}: no transcript header (empty result?)", file=sys.stderr); continue
         tid = c['id']
         rec = pos.setdefault(tid, {'max_pos': -1, 'lines': 0})
         if c.get('name'): rec['name'] = c['name']
@@ -227,15 +270,15 @@ def ingest(paths, remove=False, fallback_id=None):
             rec.setdefault('last_export', rec['checked'])
         elif c['b'] > rec.get('max_pos', -1):
             pdir = os.path.join(PEND, tid); os.makedirs(pdir, mode=0o700, exist_ok=True)
-            with open(os.path.join(pdir, f"{c['a']}-{c['b']}.jsonl"), 'w', encoding='utf-8') as fh:
-                fh.write('\n'.join(c['lines']) + '\n')
+            write_atomic(os.path.join(pdir, f"{c['a']}-{c['b']}.jsonl"), '\n'.join(c['lines']) + '\n')
         touched.add(tid)
         if remove: os.remove(p)
     for tid in touched: stitch(pos, tid)
     save_pos(pos); write_index(pos)
     print(json.dumps(next_calls(pos), ensure_ascii=False))
     if failed:
-        print(f"ERROR: {len(failed)} result file(s) were NOT ingested (invalid JSON lines); fetch those pages again", file=sys.stderr)
+        print(f"ERROR: {len(failed)} result file(s) were NOT ingested (invalid JSON lines, unreadable or "
+              f"no transcript header); refetch those pages, a smaller limit often helps", file=sys.stderr)
         return 3
     return 0
 

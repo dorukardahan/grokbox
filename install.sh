@@ -11,50 +11,68 @@
 #   install.sh --restart-scheduler   (detached) wait until no backup holds the lock, then replace a running
 #                              scheduler with the current code. Normally not needed: the scheduler re-execs
 #                              itself when scheduler.sh/lib.sh/config change.
+#   install.sh --restart-scheduler --force  terminate only the verified lock job, then restart
 #   install.sh --stop-scheduler      stop the scheduler loop
 source "$(dirname "$0")/lib.sh"
-INIT=0; SCHED=0; RESTART=0; GEN=0; SHOW=0; STOP=0
+INIT=0; SCHED=0; RESTART=0; GEN=0; SHOW=0; STOP=0; FORCE_RESTART=0
 for a in "$@"; do case "$a" in
-  --init) INIT=1;; --schedule) SCHED=1;; --restart-scheduler) RESTART=1; SCHED=1;;
+  --force) FORCE_RESTART=1;; --init) INIT=1;; --schedule) SCHED=1;; --restart-scheduler) RESTART=1; SCHED=1;;
   --gen-password) GEN=1;; --show-password) SHOW=1;; --stop-scheduler) STOP=1;;
   -h|--help) sed -n 2,17p "$0"; exit 0;;
   *) echo "unknown arg $a"; exit 2;; esac; done
+if [[ $FORCE_RESTART == 1 ]]; then
+  [[ $RESTART == 1 && $STOP == 0 && $INIT == 0 ]] || { echo "--force requires --restart-scheduler only"; exit 2; }
+  lock_busy || { echo "backup.lock is free; refusing --force (use --restart-scheduler)"; exit 1; }
+  if lock_record && [[ "${LOCK_JOB:-}" == restore* ]]; then
+    echo "backup.lock is held by restore.sh (pid $LOCK_PID): a restore has no time limit, so --force refuses to kill it. Wait for it or stop it by hand." >&2; exit 1; fi
+  python3 "$GB_DIR/lock-control.py" force "$GB_STATE/backup.lock" || exit 1
+fi
 chmod +x "$GB_DIR"/*.sh "$GB_DIR"/*.py "$GB_DIR"/rebuild-kit/*.sh "$GB_DIR"/tests/*.sh 2>/dev/null || true
 umask 077; mkdir -p "$GB_SECRETS"; chmod 700 "$GB_SECRETS"
 
 if [[ $STOP == 1 ]]; then
   p=$(sched_pid)
-  if [[ -n "$p" ]]; then kill "$p" && log "scheduler (pid $p) stopped"; else log "scheduler not running"; fi
+  if [[ -n "$p" ]]; then python3 "$GB_DIR/lock-control.py" stop "$GB_STATE/scheduler.lock" "$p" && log "scheduler (pid $p) stopped"; else log "scheduler not running"; fi
   exit 0
 fi
 
-# 1) pinned static binaries (re-download + verify against upstream SHA256SUMS if missing/corrupt)
+# 1) pinned static binaries (re-download + verify against checksums.txt + upstream SHA256SUMS if missing/corrupt)
 case "$(uname -m)" in
   x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;;
   *) echo "unsupported architecture $(uname -m) (need x86_64 or aarch64)"; exit 1;;
 esac
 dl() { if command -v curl >/dev/null 2>&1; then curl -fsSL -o "$2" "$1"; else wget -q -O "$2" "$1"; fi; }
+rb="restic_${PINNED_RESTIC}_linux_${ARCH}.bz2"; rz="rclone-v${PINNED_RCLONE}-linux-${ARCH}.zip"
+SUMS_FILE="${GB_CHECKSUMS:-$GB_DIR/checksums.txt}"
+[[ "$SUMS_FILE" == /* ]] || SUMS_FILE="$PWD/$SUMS_FILE"
 # bin/VERSIONS: arch + pinned versions (3 header lines) followed by the upstream archive checksums.
 # Any difference in arch/versions, or a binary failing SHA256SUMS.local, triggers a reinstall.
 WANT_HDR=$(printf 'arch=%s\nrestic=%s\nrclone=%s' "$ARCH" "$PINNED_RESTIC" "$PINNED_RCLONE")
 if ! (cd "$GB_BIN" 2>/dev/null && [[ -x restic && -x rclone ]] && [[ "$(head -3 VERSIONS 2>/dev/null)" == "$WANT_HDR" ]] \
       && sha256sum -c --quiet SHA256SUMS.local 2>/dev/null); then
+  for f in "$rb" "$rz"; do
+    if [[ -z "$(awk -v f="$f" '$1 ~ /^[0-9a-f]{64}$/ && $2 == f' "$SUMS_FILE" 2>/dev/null)" ]]; then
+      echo "ERROR: no pinned SHA256 for $f in $SUMS_FILE (when bumping PINNED_RESTIC/PINNED_RCLONE, add new lines to checksums.txt from the official upstream SHA256SUMS)" >&2
+      exit 1
+    fi
+  done
   log "binaries missing, corrupt or different from the pinned versions/arch -> downloading pinned restic $PINNED_RESTIC / rclone $PINNED_RCLONE ($ARCH)"
   tmp=$(mktemp -d); mkdir -p "$GB_BIN"
-  rb="restic_${PINNED_RESTIC}_linux_${ARCH}.bz2"; rz="rclone-v${PINNED_RCLONE}-linux-${ARCH}.zip"
   (
-    cd "$tmp"
+    cd "$tmp" || exit 1
     dl "https://github.com/restic/restic/releases/download/v$PINNED_RESTIC/$rb" "$rb"
     dl "https://github.com/restic/restic/releases/download/v$PINNED_RESTIC/SHA256SUMS" rs.sums
-    grep " $rb\$" rs.sums | sha256sum -c -
+    awk -v f="$rb" '$2==f' "$SUMS_FILE" | sha256sum -c -
+    awk -v f="$rb" '$2==f' rs.sums | sha256sum -c -
     dl "https://downloads.rclone.org/v$PINNED_RCLONE/$rz" "$rz"
     dl "https://downloads.rclone.org/v$PINNED_RCLONE/SHA256SUMS" rc.sums
-    grep " $rz\$" rc.sums | sha256sum -c -
+    awk -v f="$rz" '$2==f' "$SUMS_FILE" | sha256sum -c -
+    awk -v f="$rz" '$2==f' rc.sums | sha256sum -c -
     python3 -c "import bz2,shutil,sys;shutil.copyfileobj(bz2.open(sys.argv[1]),open('restic','wb'))" "$rb"
     python3 -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2],'.')" "$rz" "rclone-v$PINNED_RCLONE-linux-$ARCH/rclone"
     install -m755 restic "$GB_BIN/restic"; install -m755 "rclone-v$PINNED_RCLONE-linux-$ARCH/rclone" "$GB_BIN/rclone"
   )
-  { echo "$WANT_HDR"; grep " $rb\$" "$tmp/rs.sums"; grep " $rz\$" "$tmp/rc.sums"; } > "$GB_BIN/VERSIONS"
+  { echo "$WANT_HDR"; awk -v f="$rb" '$2==f' "$tmp/rs.sums"; awk -v f="$rz" '$2==f' "$tmp/rc.sums"; } > "$GB_BIN/VERSIONS"
   rm -rf "$tmp"; (cd "$GB_BIN" && sha256sum restic rclone > SHA256SUMS.local)
 fi
 log "restic: $("$GB_BIN/restic" version | cut -d' ' -f1-2)  rclone: $("$GB_BIN/rclone" version | head -1)"
@@ -96,7 +114,11 @@ if [[ $RESTART == 1 ]]; then
   setsid nohup bash -c '
     cd "$1" || exit 1; exec 9>>"$2/backup.lock"
     until flock -n 9; do sleep 30; done      # no backup/check/restore running now (we hold the lock)
-    p=$(cat "$2/scheduler.pid" 2>/dev/null); [ -n "$p" ] && kill "$p" 2>/dev/null
+    source "$1/lib.sh"
+    p=$(sched_pid)
+    if [[ -n "$p" ]]; then
+      python3 "$1/lock-control.py" stop "$2/scheduler.lock" "$p" 2>/dev/null || log "scheduler stop refused or failed; continuing restart handoff"
+    fi
     sleep 2; flock -u 9; exec 9>&-
     setsid nohup "$1/scheduler.sh" >>"$3/scheduler.out" 2>&1 </dev/null & disown
     echo "[$(date "+%F %T %Z")] scheduler restarted with current code (handoff helper)" >> "$3/backup-$(date +%Y-%m).log"
