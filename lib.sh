@@ -12,6 +12,7 @@ source "$GB_CONFIG"
 # defaults for settings added after a config.env was written (older configs keep working)
 : "${RESTIC_TIMEOUT:=3h}" "${RESTIC_TIMEOUT_BACKUP:=12h}" "${RESTIC_TIMEOUT_CHECK:=8h}" "${RCLONE_TIMEOUT:=300}"
 : "${LOCK_ALERT_HOURS:=13}" "${HEARTBEAT_MAX_MIN:=90}" "${PRUNE_USE_TRASH:=1}"
+: "${QUOTA_ALERT_PCT:=90}" "${LOG_RETENTION_DAYS:=0}" "${RESTORE_LOCK_WAIT:=600}"
 export TZ
 umask 077   # state, logs, staging and restored scratch data are private by default
 mkdir -p "$GB_STATE" "$GB_LOGS" "$GB_STAGING" "$RESTIC_CACHE_DIR"
