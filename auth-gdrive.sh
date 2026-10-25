@@ -24,21 +24,19 @@ for a in "$@"; do case "$a" in
 [[ -x "$RCLONE" ]] || { echo "rclone missing: run ./install.sh first"; exit 1; }
 mkdir -p "$GB_SECRETS"; chmod 700 "$GB_SECRETS"
 URL_FILE="$GB_STATE/auth-url.txt"
-out="$GB_LOGS/auth-$GB_REMOTE.out"; CHILD=""
-# Whatever happens (done, timeout, signal): stop the OAuth helper, never keep the URL or its output.
-BAK=""; DONE=0
-cleanup() { [[ -n "$CHILD" ]] && kill "$CHILD" 2>/dev/null; rm -f "$URL_FILE" "$out"
-  if [[ -n "$BAK" && -f "$BAK" ]]; then
-    if [[ $DONE == 1 ]]; then rm -f "$BAK"
-    else mv -f "$BAK" "$RCLONE_CONFIG"; echo "consent not completed: previous rclone.conf put back (old token unchanged)"; fi
-  fi; }
-trap cleanup EXIT; trap 'exit 130' INT TERM HUP
+CHILD=""; WORK=""
+# Only the consent owner installs cleanup; --test never removes another flow's files.
+cleanup() {
+  if [[ -n "$CHILD" ]]; then kill "$CHILD" 2>/dev/null; wait "$CHILD" 2>/dev/null; fi
+  rm -f "$URL_FILE"
+  [[ -z "$WORK" ]] || rm -rf "$WORK"
+}
 
 wait_for_consent() {  # waits for the OAuth helper ($CHILD, output in $out); 0 only if it exited 0
   local url rc
   for _ in $(seq 1 30); do grep -q 'http://127.0.0.1:53682/auth' "$out" && break; kill -0 "$CHILD" 2>/dev/null || break; sleep 1; done
   url=$(grep -o 'http://127.0.0.1:53682/auth?state=[A-Za-z0-9_-]*' "$out" | head -1)
-  [[ -n "$url" ]] || { echo "rclone did not print an auth URL. Last lines:"; grep -vi token "$out" | tail -5; return 1; }
+  [[ -n "$url" ]] || { echo "rclone did not print an auth URL; active credentials are unchanged."; return 1; }
   echo "$url" > "$URL_FILE"; chmod 600 "$URL_FILE"
   echo "OPEN THIS URL in the box browser (the human signs in with their Google account and clicks Allow):"
   echo "$url"
@@ -47,7 +45,7 @@ wait_for_consent() {  # waits for the OAuth helper ($CHILD, output in $out); 0 o
   for _ in $(seq 1 600); do kill -0 "$CHILD" 2>/dev/null || break; sleep 1; done
   if kill -0 "$CHILD" 2>/dev/null; then echo "Timed out waiting for consent (10 min); stopping the OAuth helper."; return 1; fi
   wait "$CHILD"; rc=$?; CHILD=""
-  (( rc == 0 )) || { echo "OAuth helper failed (exit $rc). Last lines:"; grep -vi token "$out" | tail -5; return 1; }
+  (( rc == 0 )) || { echo "OAuth helper failed (exit $rc); active credentials are unchanged."; return 1; }
 }
 # 0 = token present and section is type=drive/scope=drive.file, 1 = no token, 2 = token but wrong type/scope
 have_token() {
@@ -63,12 +61,12 @@ PY
 # drive_ok: the token works for THIS remote (Drive answers) and, if it exists, the repo folder is visible
 drive_ok() {
   RCL about "$GB_REMOTE:" >/dev/null 2>&1 || { echo "FAIL: 'rclone about $GB_REMOTE:' failed (token revoked/expired, or Drive unreachable)"; return 1; }
-  if RCL lsf --max-depth 1 "$GB_REMOTE:$GB_FOLDER" >"$GB_STATE/auth-test.tmp" 2>/dev/null; then
-    if grep -qx config "$GB_STATE/auth-test.tmp"; then echo "OK: remote '$GB_REMOTE' works; restic repository found at $GB_REMOTE:$GB_FOLDER"
+  local listing
+  if listing=$(RCL lsf --max-depth 1 "$GB_REMOTE:$GB_FOLDER" 2>/dev/null); then
+    if grep -qx config <<< "$listing"; then echo "OK: remote '$GB_REMOTE' works; restic repository found at $GB_REMOTE:$GB_FOLDER"
     else echo "OK: remote '$GB_REMOTE' works; folder $GB_FOLDER visible but holds no restic repository (yet)"; fi
-  else echo "WARN: remote '$GB_REMOTE' works but $GB_REMOTE:$GB_FOLDER is not visible (wrong folder, or created by another OAuth client: drive.file scope)"
-    rm -f "$GB_STATE/auth-test.tmp"; return 2; fi
-  rm -f "$GB_STATE/auth-test.tmp"; return 0
+  else echo "WARN: remote '$GB_REMOTE' works but repository folder is not visible (wrong folder or OAuth client)"; return 2; fi
+  return 0
 }
 if [[ $TEST == 1 ]]; then
   have_token; t=$?
@@ -86,9 +84,22 @@ if [[ $REAUTH == 0 ]]; then
   if (( t != 1 )); then
     echo "If the problem persists: delete $RCLONE_CONFIG (or its [$GB_REMOTE] section) and run ./auth-gdrive.sh again (or use --reauth)."; exit 1; fi
 fi
-mkdir -p "$GB_LOGS"; : > "$out"; chmod 600 "$out"
-if [[ -s "$RCLONE_CONFIG" ]]; then   # keep the current config (other remotes + the old token) until consent succeeds
-  BAK="$RCLONE_CONFIG.pre-auth-$(date +%s)"; cp -p "$RCLONE_CONFIG" "$BAK"; chmod 600 "$BAK"; fi
+# Holding the same lock pauses backups/checks throughout consent and verification.
+exec 9>>"$GB_STATE/backup.lock"
+flock -n 9 || { echo "A backup/check or consent flow is running; retry when it finishes."; exit 75; }
+took_lock auth
+ACTIVE_CONFIG="$RCLONE_CONFIG"
+WORK=$(mktemp -d "${ACTIVE_CONFIG}.auth.XXXXXX") || exit 1
+trap cleanup EXIT; trap 'exit 130' INT TERM HUP
+out="$WORK/output"
+: > "$out"
+if [[ -s "$ACTIVE_CONFIG" ]]; then
+  if ! cp -p "$ACTIVE_CONFIG" "$WORK/previous" || ! cmp -s "$ACTIVE_CONFIG" "$WORK/previous"; then
+    echo "Cannot verify rclone.conf backup copy; consent not started, active config unchanged."; exit 1
+  fi
+  cp -p "$WORK/previous" "$WORK/config" || exit 1
+else : > "$WORK/config"; fi
+export RCLONE_CONFIG="$WORK/config"
 
 if [[ $MODE == own ]]; then
   CLIENT_JSON="$GB_SECRETS/gdrive-oauth-client.json"
@@ -133,9 +144,19 @@ WARN
   CHILD=$!
 fi
 wait_for_consent "$out" || exit 1
-chmod 600 "$RCLONE_CONFIG" 2>/dev/null
-if RCL about "$GB_REMOTE:" >/dev/null 2>&1; then
-  DONE=1
-  RCL mkdir "$GB_REMOTE:$GB_FOLDER" \
-    && echo "OK: Drive connected as remote '$GB_REMOTE'; folder '$GB_FOLDER' ready. Next: ./install.sh --init (new repo) or ./auth-gdrive.sh --test"
-else echo "Auth not completed. Last log lines:"; grep -vi token "$out" | tail -5; exit 1; fi
+chmod 600 "$RCLONE_CONFIG" || exit 1
+verified=0
+for attempt in 1 2 3; do
+  if have_token && RCL about "$GB_REMOTE:" >/dev/null 2>&1; then verified=1; break; fi
+  (( attempt == 3 )) || sleep 2
+done
+if [[ $verified != 1 ]]; then
+  echo "Consent could not be verified after three Drive checks; active credentials unchanged. Retry when Drive is reachable."; exit 1
+fi
+if ! RCL mkdir "$GB_REMOTE:$GB_FOLDER" >/dev/null 2>&1; then
+  echo "Drive authorised, but repository folder creation failed; check folder access/quota and retry. Active credentials unchanged."; exit 1
+fi
+if ! mv -f "$RCLONE_CONFIG" "$ACTIVE_CONFIG"; then
+  echo "Could not install verified credentials; active config unchanged."; exit 1
+fi
+echo "OK: Drive connected as remote '$GB_REMOTE'; folder '$GB_FOLDER' ready. Next: ./install.sh --init (new repo) or ./auth-gdrive.sh --test"

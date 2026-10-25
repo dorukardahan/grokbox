@@ -199,7 +199,7 @@ check "a skipped backup raises the lock-age alert" grep -q 'backup.lock held for
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 echo "$(( $(date +%s) - 20 * 3600 )) 999999999 gone" > "$TMP/state/lock-holder"
 "$REPO_DIR/status.sh" --local >"$TMP/status.out" 2>&1 || true
-check "lock age is not reported when the recorded holder pid is gone" not grep -q 'backup.lock held for' "$TMP/status.out"
+check "orphaned lock retains recorded age and reports leftover holders" grep -q 'backup.lock held for 20h; orphaned' "$TMP/status.out"
 kill "$LP" 2>/dev/null || true; wait "$LP" 2>/dev/null || true; "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 ( exec 7>>"$TMP/state/scheduler.lock"; flock 7; exec sleep 60 ) & SP=$!; sleep 1
 echo $(( $(date +%s) - 3 * 3600 )) > "$TMP/state/scheduler.heartbeat"
