@@ -10,7 +10,7 @@ GrokBox-Assist for Main's own conversation) pulls the pages (in=<id>, limit=200,
                                                      ingested (file kept, exit 3), so no message is lost
   server-export-merge.py next                         what to call next (JSON): per transcript the
                                                      `before` value still needed, or "newest"; {} = all complete
-  server-export-merge.py index                        rewrite INDEX.md
+  server-export-merge.py index                        refresh deleted flags and rewrite INDEX.md
   server-export-merge.py age [--max-hours 26] [ID...] hours since each id was last checked (JSON);
                                                      exit 1 if one is missing or older (did the routine run?)
   server-export-merge.py repair                       merge an id's history split over several files
@@ -23,6 +23,10 @@ Layout (dir 700, files 600):
   transcripts/<id>__<slug>.jsonl   oldest first, one message per line
   state/positions.json             {id: {name, total, max_pos, lines, last_export, ...}}
   state/pending/<id>/<A>-<B>.jsonl pages not yet contiguous with what is exported (a gap remains)
+Deleted flags come from DELETED_BOTS_FILE (default /home/box/agent-data/deleted-agents.json;
+empty disables it). Stored names stay raw; INDEX.md adds " (deleted)" for display. Transcript
+filenames do not change on deletion: renaming would churn snapshot paths and require care with
+restore/positions consistency. INDEX.md/positions.json identify deletion; files stay restorable by id.
 Pages are stitched by the header range "positions A–B of N". A page that overlaps what is already
 exported (the incremental case: newest page) is de-duplicated by matching the longest suffix of the
 exported file against the page's head (positions and lines are not 1:1: tool results can share a slot).
@@ -77,6 +81,38 @@ def write_atomic(path, text):
 
 def save_pos(p):
     write_atomic(POSF, json.dumps(p, indent=1, ensure_ascii=False, sort_keys=True))
+
+
+def deleted_ids():
+    # Keep tolerant parsing identical to expected-bots.sh's deleted_ids block.
+    ids = set()
+    try:
+        with open(os.environ.get('DELETED_BOTS_FILE', '/home/box/agent-data/deleted-agents.json'),
+                  encoding='utf-8') as f: entries = json.load(f)
+        if isinstance(entries, dict):
+            entries = entries["agents"] if "agents" in entries else {k: v for k, v in entries.items() if isinstance(v, dict)}
+        if isinstance(entries, dict): ids = set(entries)
+        elif isinstance(entries, list):
+            for entry in entries:
+                tid = entry.get("id") if isinstance(entry, dict) else entry
+                if isinstance(tid, str): ids.add(tid)
+    except (OSError, ValueError): pass
+    return ids
+
+
+def refresh_deleted(pos):
+    ids, changed = deleted_ids(), False
+    for tid, rec in pos.items():
+        if tid in ids:
+            if rec.get('deleted') is not True: rec['deleted'] = True; changed = True
+        elif 'deleted' in rec:
+            del rec['deleted']; changed = True
+    return changed
+
+
+def display_name(name, deleted):
+    name = name or '?'
+    return name + ' (deleted)' if deleted and not name.endswith(' (deleted)') else name
 
 
 def canon(line):
@@ -274,6 +310,7 @@ def ingest(paths, remove=False, fallback_id=None):
         touched.add(tid)
         if remove: os.remove(p)
     for tid in touched: stitch(pos, tid)
+    refresh_deleted(pos)
     save_pos(pos); write_index(pos)
     print(json.dumps(next_calls(pos), ensure_ascii=False))
     if failed:
@@ -286,7 +323,9 @@ def ingest(paths, remove=False, fallback_id=None):
 def next_calls(pos):
     """before value still needed per transcript (None = complete)."""
     out = {}
+    ids = deleted_ids()
     for tid, r in pos.items():
+        if tid in ids: continue
         M = r.get('max_pos', -1)
         pend = r.get('pending') or []
         if pend:
@@ -319,8 +358,17 @@ def write_index(pos):
             st = 'complete' if r.get('max_pos', -1) >= r.get('total', 0) - 1 and not r.get('pending') else \
                  f"gap (pending {r.get('pending')})"
             if r.get('total', 0) == 0: st = 'not readable via ReadTranscript' if r.get('unreadable') else 'empty'
+            if r.get('deleted'):
+                total = r.get('total', 0)
+                kept = max(0, r.get('max_pos', -1) + 1)
+                if total > 0: kept = min(total, kept)
+                st = (f'deleted, history kept ({kept} messages, no longer readable)' if kept and (not total or r.get('unreadable')) else
+                      f'deleted, nothing exported (0 of {total} messages)' if not kept and total > 0 else
+                      'deleted before first export' if not kept else
+                      'deleted, history kept (complete)' if st == 'complete' else
+                      f'deleted, history kept ({kept} of {total} messages, export incomplete)')
             if r.get('warnings'): st += f", {len(r['warnings'])} warning(s)"
-            f.write(f"| {r.get('name') or '?'} | `{tid}` | {r.get('total', 0)} | {r.get('max_pos', -1)} | "
+            f.write(f"| {display_name(r.get('name'), r.get('deleted'))} | `{tid}` | {r.get('total', 0)} | {r.get('max_pos', -1)} | "
                     f"{r.get('lines', 0)} | {r.get('last_export', '-')} | {st} |\n")
     os.chmod(os.path.join(BASE, 'INDEX.md'), 0o600)
 
@@ -379,7 +427,7 @@ if __name__ == '__main__':
                 i = a.index(opt); kw[key] = a[i + 1]; del a[i:i + 2]
         memory(a, rm, **kw)
     elif a[0] == 'repair':
-        pos = load_pos(); repair(pos); save_pos(pos); write_index(pos)
+        pos = load_pos(); repair(pos); refresh_deleted(pos); save_pos(pos); write_index(pos)
     elif a[0] == 'age':
         a = a[1:]; mh = 26.0
         if '--max-hours' in a:
@@ -388,4 +436,6 @@ if __name__ == '__main__':
     elif a[0] == 'next':
         print(json.dumps(next_calls(load_pos()), ensure_ascii=False, indent=1))
     else:
-        write_index(load_pos())
+        pos = load_pos()
+        if refresh_deleted(pos): save_pos(pos)
+        write_index(pos)

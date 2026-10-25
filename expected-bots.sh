@@ -24,6 +24,7 @@ from datetime import datetime
 pos_file, max_h, grace_min = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
 deleted_file, retired_n = sys.argv[4], int(sys.argv[5])
 retired, want = sys.argv[6:6 + retired_n], sys.argv[6 + retired_n:]
+# Keep tolerant parsing identical to server-export-merge.py: deleted_ids().
 deleted_ids = set()
 try:
     with open(deleted_file, encoding="utf-8") as f: entries = json.load(f)
@@ -63,11 +64,18 @@ for e in want:
     if is_deleted(e, tid, rec):
         total = as_int(rec.get("total"), 0) if rec else 0
         M = as_int(rec.get("max_pos"), -1) if rec else -1
-        kept = max(0, min(total, M + 1))
+        kept = max(0, M + 1)
+        if total > 0: kept = min(total, kept)
         incomplete = M < total - 1 or bool(rec and rec.get("pending"))
-        status = (f"deleted, history kept ({kept} of {total} messages, export incomplete)" if incomplete else
-                  f"deleted, history kept ({kept} messages)") if kept else "deleted before first export"
-        deleted.append(f"{e} ({status})"); continue
+        status = (f"history kept ({kept} messages, no longer readable)" if kept and (not total or rec.get("unreadable")) else
+                  "never exported" if not rec or not total else
+                  f"nothing exported (0 of {total} messages)" if not kept else
+                  f"history kept ({kept} of {total} messages, export incomplete)" if incomplete else
+                  f"history kept ({kept} messages)")
+        name = (rec.get("name") or e) if rec else e
+        label = name if name.endswith(" (deleted)") else name + " (deleted)"
+        if e == tid and e != name: label += f" [{e[:8]}]"
+        deleted.append(f"{label}: {status}"); continue
     active += 1
     if rec is None: missing.append(f"{e} (never exported)"); stable.append(f"{e} (never exported)"); continue
     if rec.get("unreadable"): missing.append(f"{e} (not readable)"); stable.append(f"{e} (not readable)"); continue

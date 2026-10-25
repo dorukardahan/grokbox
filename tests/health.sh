@@ -272,28 +272,45 @@ for history in gap pending complete zero negative; do
   cfg=$(mkcfg bots-kept 'EXPECTED_BOTS=("tid-history")' 'DELETED_BOTS_FILE=""' 'RETIRED_BOTS=("tid-history")')
   rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
   if [[ -n "$expected" ]]; then
-    expected="deleted, history kept ($expected)"
+    expected="history kept ($expected)"
   else
-    expected='deleted before first export'
+    expected='nothing exported (0 of 100 messages)'
   fi
-  checkx "$history deleted history: accurate kept count and completeness, no alert" 'test "$rc" = 0 && test "$out" = "no active expected bots; deleted: tid-history ($expected)" && test "$(nalerts "expected bots")" = 0'
+  checkx "$history deleted history: accurate kept count and completeness, no alert" 'test "$rc" = 0 && test "$out" = "no active expected bots; deleted: tid-history (deleted): $expected" && test "$(nalerts "expected bots")" = 0'
 done
+mkpos
+
+# A failed read must not hide history already exported before deletion.
+for fixture in '0 4 true 5' '0 4 false 5' '3 4 true 3' '8 4 true 5'; do
+  read -r total max_pos unreadable kept <<< "$fixture"
+  printf '{"tid-history":{"total":%s,"max_pos":%s,"unreadable":%s}}\n' "$total" "$max_pos" "$unreadable" > "$SE/state/positions.json"
+  cfg=$(mkcfg bots-unreadable-kept 'EXPECTED_BOTS=("tid-history")' 'DELETED_BOTS_FILE=""' 'RETIRED_BOTS=("tid-history")')
+  rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
+  checkx "deleted history survives failed reads ($fixture)" 'test "$rc" = 0 && test "$out" = "no active expected bots; deleted: tid-history (deleted): history kept ($kept messages, no longer readable)" && test "$(nalerts "expected bots")" = 0'
+done
+mkpos
+
+# Display the raw name, distinguish id entries, and never double the deletion suffix.
+echo '{"tid-long-id":{"name":"Helper Bot (deleted)","total":5,"max_pos":4}}' > "$SE/state/positions.json"
+cfg=$(mkcfg bots-label 'EXPECTED_BOTS=("tid-long-id")' 'DELETED_BOTS_FILE=""' 'RETIRED_BOTS=("tid-long-id")')
+rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
+checkx "deleted label is idempotent and id roster suffix is eight characters" 'test "$rc" = 0 && test "$out" = "no active expected bots; deleted: Helper Bot (deleted) [tid-long]: history kept (5 messages)"'
 mkpos
 
 # Deleted fixtures never consult the box's real deleted-agent list.
 echo '{"version":1,"agents":{"tid-2":{"upstream":"pending"},"bot-gone":{},"tid-3":{}}}' > "$TMP/deleted-agents.json"
 del=$(mkcfg bots-deleted 'EXPECTED_BOTS=("bot-gone" "old-bot-name" "Hidden Bot" "Test Bot")' 'RETIRED_BOTS=("old bot name")')
 rc=0; out=$(GB_CONFIG="$del" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
-checkx "absent and unreadable deleted bots: exit 0, no alert; active bot still complete" 'test "$rc" = 0 && [[ "$out" == "all 1 expected bots present and complete"* && "$out" == *"bot-gone (deleted before first export)"* && "$out" == *"Hidden Bot (deleted before first export)"* && "$out" == *"old-bot-name (deleted before first export)"* ]] && test "$(nalerts "expected bots")" = 0'
+checkx "absent and unreadable deleted bots: exit 0, no alert; active bot still complete" 'test "$rc" = 0 && [[ "$out" == "all 1 expected bots present and complete"* && "$out" == *"bot-gone (deleted): never exported"* && "$out" == *"Hidden Bot (deleted): never exported"* && "$out" == *"old-bot-name (deleted): never exported"* ]] && test "$(nalerts "expected bots")" = 0'
 del=$(mkcfg bots-history 'EXPECTED_BOTS=("old-bot" "Old Bot")')
 rc=0; out=$(GB_CONFIG="$del" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
-checkx "all deleted, including stale history: exit 0 and no alert" 'test "$rc" = 0 && [[ "$out" == "no active expected bots; deleted:"* && "$out" == *"Old Bot (deleted, history kept (5 messages))"* ]] && test "$(nalerts "expected bots")" = 0'
-for payload in '{"version":1,"tid-2":{}}' '{"agents":["tid-2"]}' '{"agents":[{"id":"tid-2"}]}' '["tid-2"]' '[{"id":"tid-2"}]'; do
+checkx "all deleted, including stale history: exit 0 and no alert" 'test "$rc" = 0 && [[ "$out" == "no active expected bots; deleted:"* && "$out" == *"Old Bot (deleted): history kept (5 messages)"* ]] && test "$(nalerts "expected bots")" = 0'
+for payload in '{"version":1,"tid-2":{}}' '{"agents":["tid-2"]}' '{"agents":[{"id":"tid-2"}]}' '["tid-2"]' '[{"id":"tid-2"}]' '[{"id":"tid-2"},null,3,{"id":[]}]' '{"tid-2":{},"version":1}'; do
   printf '%s\n' "$payload" > "$TMP/deleted-agents.json"
   # Resolve a slug to its record id before consulting the list.
   cfg=$(mkcfg bots-shape 'EXPECTED_BOTS=("old-bot")')
   rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
-  checkx "deleted list shape $payload resolves name slug to id" 'test "$rc" = 0 && [[ "$out" == *"deleted, history kept (5 messages)"* ]] && test "$(nalerts "expected bots")" = 0'
+  checkx "deleted list shape $payload resolves name slug to id" 'test "$rc" = 0 && [[ "$out" == *"(deleted): history kept (5 messages)"* ]] && test "$(nalerts "expected bots")" = 0'
 done
 cfg=$(mkcfg bots-mixed 'EXPECTED_BOTS=("Ghost Bot" "Old Bot")')
 rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
@@ -308,7 +325,7 @@ for kind in missing garbled empty directory; do
 done
 cfg=$(mkcfg bots-retired 'EXPECTED_BOTS=("tid-2")' 'DELETED_BOTS_FILE=""' 'RETIRED_BOTS=("OLD BOT")')
 rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
-checkx "retired name matches resolved record: exit 0, history kept, no alert" 'test "$rc" = 0 && [[ "$out" == *"deleted, history kept (5 messages)"* ]] && test "$(nalerts "expected bots")" = 0'
+checkx "retired name matches resolved record: exit 0, history kept, no alert" 'test "$rc" = 0 && [[ "$out" == *"Old Bot (deleted) [tid-2]: history kept (5 messages)"* ]] && test "$(nalerts "expected bots")" = 0'
 cfg=$(mkcfg bots-disabled 'EXPECTED_BOTS=("tid-2")' 'DELETED_BOTS_FILE=""')
 rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh") || rc=$?
 checkx "explicit empty deleted-list path disables it" 'test "$rc" = 1 && [[ "$out" == *"tid-2 (last export check 40 h ago)"* ]]'
@@ -318,7 +335,7 @@ for roster in 'EXPECTED_BOTS=("tid-2")' 'EXPECTED_BOTS=("tid-2" "bot-a")'; do
   if [[ "$roster" == *bot-a* ]]; then
     checkx "no positions: only active bots unverified, exit 2 and active count in alert" 'test "$rc" = 2 && [[ "$out" == "no server-side export yet (1 expected bots unverified;"* ]] && grep -q "(1 expected bots unverified," "$TMP/state/ALERT" && ! grep -q "tid-2\|deleted" "$TMP/state/ALERT"'
   else
-    checkx "no positions and all deleted: exit 0, no alert" 'test "$rc" = 0 && [[ "$out" == "no active expected bots; deleted: tid-2 (deleted before first export)" ]] && test "$(nalerts "expected bots")" = 0'
+    checkx "no positions and all deleted: exit 0, no alert" 'test "$rc" = 0 && [[ "$out" == "no active expected bots; deleted: tid-2 (deleted): never exported" ]] && test "$(nalerts "expected bots")" = 0'
   fi
 done
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
@@ -461,7 +478,7 @@ check "one line per topic" bash -c 'for t in alerts scheduler "backup lock" cred
 echo '{"agents":{"tid-2":{}}}' > "$TMP/deleted-agents.json"
 dcd=$(mkcfg doc-deleted "GB_STATE=$D" 'EXPECTED_BOTS=("Old Bot")')
 rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
-check "deleted bot with stale history: doctor expected bots OK, exit 0" all test "$rc" = 0 --and-- grep -q '^OK       expected bots: no active expected bots; deleted: Old Bot (deleted, history kept (5 messages))' "$TMP/doc.out"
+check "deleted bot with stale history: doctor expected bots OK, exit 0" all test "$rc" = 0 --and-- grep -q '^OK       expected bots: no active expected bots; deleted: Old Bot (deleted): history kept (5 messages)' "$TMP/doc.out"
 printf 'drive_used=1\ndrive_total=2\ndrive_pct=50\ndisk_pct=85\ndisk_path=/tmp\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "disk 85%: WARN only -> exit 1" all test "$rc" = 1 --and-- grep -q '^WARN *quota/disk: Drive 50% used, local disk 85% used' "$TMP/doc.out" --and-- grep -q '^Overall: WARN' "$TMP/doc.out"

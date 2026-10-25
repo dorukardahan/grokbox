@@ -108,7 +108,14 @@ still no export at all, a nonempty roster raises one alert (the bots' routines c
 Deleted bots may stay in `EXPECTED_BOTS`: ids in `DELETED_BOTS_FILE` (default
 `/home/box/agent-data/deleted-agents.json`) and names or ids in `RETIRED_BOTS=()` are exempt from
 missing/stale alerts. Retired names match case-insensitively or by slug. The status shows
-“deleted, history kept (N messages)” or “deleted before first export”; it does not remove history.
+names as “Helper Bot (deleted): history kept (N messages)”, or
+“history kept (K of N messages, export incomplete)” for partial history. With a known total but
+no exported messages it shows “nothing exported (0 of N messages)”; absent records, or empty or
+unreadable records with nothing kept and no known positive total, show “never exported”. Previously
+exported history that is no longer readable shows “history kept (K messages, no longer readable)”.
+The suffix is added only once, including for `RETIRED_BOTS`.
+An id roster entry differing from the display name adds its first eight characters in brackets,
+for example “Helper Bot (deleted) [tid-2]: never exported”. History is never removed.
 Set `DELETED_BOTS_FILE=""` to disable the list. Missing or invalid lists are silently ignored.
 Only active bots count toward export checks; an entirely deleted roster is OK even before any export.
 

@@ -77,3 +77,22 @@ that older versions split; it keeps the originals in `state/replaced/`.
   shared memory. The primary bot exports its own once at setup or on request ([bots.md](bots.md)); other
   bots' on-box memory files are in the brain export;
 - Pages/canvases (`ListCanvases` only shows a bot's own Pages).
+
+### Deleted bots
+
+The merger reads `DELETED_BOTS_FILE` from the environment (default
+`/home/box/agent-data/deleted-agents.json`; `""` disables it), using the same tolerant parsing as
+`expected-bots.sh`. Export this variable when overriding it for the merger; the Python command
+does not source `config.env`. Missing, empty, invalid or directory paths mean no deleted ids.
+
+`ingest`, `index` and `repair` refresh a boolean `deleted: true` in `state/positions.json`, removing it when
+an id leaves the list. The stored `name` remains the original raw name. `INDEX.md` displays
+“Name (deleted)” (only one suffix), with status “deleted, history kept (complete)” or
+“deleted, history kept (K of N messages, export incomplete)”. Previously exported history that is no longer readable shows
+“deleted, history kept (K messages, no longer readable)”. A known positive total with nothing kept
+shows “deleted, nothing exported (0 of N messages)”; empty or unreadable records with nothing kept
+and no known positive total show “deleted before first export”. `next` skips deleted ids because they cannot be read.
+
+Transcript filenames stay unchanged on deletion. Renaming them would churn paths across snapshots
+and require care with restore/positions consistency. The label in `INDEX.md` and flag in
+`positions.json` already identify deleted bots; each transcript stays restorable under its id.
