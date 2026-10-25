@@ -13,7 +13,9 @@ for a in "$@"; do case "$a" in --online) ONLINE=1;; --json) JSON=1;; -h|--help) 
 now=$(date +%s)
 N=(); S=(); D=()
 row(){ S+=("$1"); N+=("$2"); D+=("$3"); }
-epochf(){ local v; v=$(head -c 32 "$1" 2>/dev/null | tr -cd '0-9'); echo "$v"; }   # epoch from a timestamp file ("" if unusable)
+# Every number from a state file passes lib.sh's num_ok/epoch_ok (bounded plain integers, no octal, no overflow):
+# epochf FILE, kv_num FILE KEY, kv_epoch FILE KEY give the value or nothing; isnum tests the result.
+epochf(){ epoch_file "$1"; }
 isnum(){ [[ "${1:-}" =~ ^[0-9]+$ ]]; }
 ago(){ local d; isnum "$1" || { echo "unknown"; return; }; d=$(( now - $1 )); (( d < 0 )) && d=0
   if (( d < 3600 )); then echo "$(( d / 60 )) min ago"; elif (( d < 172800 )); then echo "$(( d / 3600 )) h ago"; else echo "$(( d / 86400 )) d ago"; fi; }
@@ -27,24 +29,29 @@ else row OK alerts "none open"; fi
 [[ -e "$GUARD_LATCH" ]] && row PROBLEM "stale guard" "latch set ($(cut -d' ' -f2- "$GUARD_LATCH" 2>/dev/null | cut -c1-120)); forget/prune blocked until a good hourly backup; see REBUILD.md, never --force blindly"
 [[ -e "$SQLITE_LATCH" ]] && row WARN "sqlite staging" "latch set since $(at "$(epochf "$SQLITE_LATCH")"): a consistent-copy run failed; forget/prune blocked until a fully clean hourly backup"
 
-# --- scheduler + heartbeat
+# --- scheduler + heartbeat. A stale heartbeat is excused only while the scheduler's own verified child job
+# (lock-holder pid really holds backup.lock, parent = scheduler, lock taken after the last tick, within the
+# job budget: lib.sh heartbeat_job_active) runs; an unrelated or orphaned lock never hides a hung loop.
 hb=$(epochf "$GB_STATE/scheduler.heartbeat")
 if sched_running; then
   if isnum "$hb" && (( now - hb >= ${HEARTBEAT_MAX_MIN:-90} * 60 )); then
-    if lock_busy; then row OK scheduler "running (pid $(sched_pid)); heartbeat $(ago "$hb") (paused while its job holds the lock)"
-    else row PROBLEM scheduler "running (pid $(sched_pid)) but its loop has not ticked for $(( (now - hb) / 60 )) min: hung; run ./install.sh --restart-scheduler"; fi
-  else row OK scheduler "running (pid $(sched_pid)), last tick $(ago "$hb")"; fi
+    if heartbeat_job_active "$hb"; then row OK scheduler "running (pid $(sched_pid)); heartbeat $(ago "$hb"), paused while its own job (${LOCK_JOB:-?}, pid $LOCK_PID) holds the lock"
+    else row PROBLEM scheduler "running (pid $(sched_pid)) but its loop has not ticked for $(( (now - hb) / 60 )) min and no verified job of its own holds the lock: hung; run ./install.sh --restart-scheduler"; fi
+  elif isnum "$hb"; then row OK scheduler "running (pid $(sched_pid)), last tick $(ago "$hb")"
+  else row WARN scheduler "running (pid $(sched_pid)), last tick unknown (state/scheduler.heartbeat missing or garbled)"; fi
 else row PROBLEM scheduler "NOT running (box moved?): run ./install.sh --schedule"; fi
 
-# --- backup lock
+# --- backup lock. "Alive" means the recorded pid really has backup.lock open (lib.sh lock_record +
+# lock_holder_alive via /proc/<pid>/fd), not merely that a /proc entry exists (pid reuse). lock_problem
+# waits 2 s for the flock -> record race and names the leftover holder processes for an orphan.
 if lock_busy; then
-  read -r lt lp lrest < "$GB_STATE/lock-holder" 2>/dev/null || { lt=""; lp=""; lrest=""; }
-  if isnum "$lt"; then
-    held_h=$(( (now - lt) / 3600 )); who="${lrest:-?} (pid ${lp:-?})"
-    if isnum "$lp" && [[ ! -d "/proc/$lp" ]]; then row WARN "backup lock" "held, but the recorded holder $who is gone (orphaned child or stale record); status.sh/watchdog decide; wait for the timeout or ./install.sh --restart-scheduler"
-    elif (( held_h >= ${LOCK_ALERT_HOURS:-13} )); then row PROBLEM "backup lock" "held by $who for ${held_h} h (longer than LOCK_ALERT_HOURS=${LOCK_ALERT_HOURS:-13}): hung job? ./install.sh --restart-scheduler after the timeout"
-    else row OK "backup lock" "held by $who since $(at "$lt") ($(ago "$lt")): a job is running"; fi
-  else row WARN "backup lock" "held, holder unknown (state/lock-holder missing or garbled)"; fi
+  lp=$(lock_problem)
+  if [[ -n "$lp" ]]; then
+    row PROBLEM "backup lock" "$lp (nothing is killed automatically; docs/lock-and-prune-safety.md)"
+  elif lock_record && lock_holder_alive; then
+    row OK "backup lock" "held by ${LOCK_JOB:-?} (pid $LOCK_PID) since $(at "$LOCK_TIME") ($(ago "$LOCK_TIME")): a job is running"
+  elif lock_busy; then row WARN "backup lock" "held, holder unverifiable right now (state/lock-holder being written?); run again"
+  else row OK "backup lock" "free (a job just finished)"; fi
 else row OK "backup lock" "free"; fi
 
 # --- credentials
@@ -55,9 +62,9 @@ if is_rclone_repo && [[ ! -s "$RCLONE_CONFIG" ]]; then creds=0; row PROBLEM "dri
 
 # --- last backup (last-backup.result from backup.sh if present, else the classic timestamp files)
 lb="$GB_STATE/last-backup.result"
-lres=$(kv_get "$lb" result); lt=$(kv_get "$lb" time); lsnap=$(kv_get "$lb" snapshot); lfiles=$(kv_get "$lb" files); lunread=$(kv_get "$lb" unreadable)
+lres=$(kv_get "$lb" result); lt=$(kv_epoch "$lb" time); lsnap=$(kv_get "$lb" snapshot); lfiles=$(kv_num "$lb" files); lunread=$(kv_num "$lb" unreadable)
+[[ "$lsnap" =~ ^[0-9a-f]{1,64}$ ]] || lsnap=""
 ok_t=$(epochf "$GB_STATE/last-success"); part_t=$(epochf "$GB_STATE/last-partial"); first=$(epochf "$GB_STATE/first-start")
-isnum "$ok_t" || ok_t=""
 if [[ "$lres" == complete ]] && isnum "$lt" && (( lt > ${ok_t:-0} )); then ok_t=$lt; fi
 lim=${ALERT_NO_SUCCESS_HOURS:-3}
 if [[ -n "$ok_t" ]]; then
@@ -74,7 +81,8 @@ else row WARN "last backup" "none yet (just installed; the first hourly run or .
 
 # --- last check (last-check.result from check.sh if present, else state/last-check)
 lc="$GB_STATE/last-check.result"
-cres=$(kv_get "$lc" result); ct=$(kv_get "$lc" time); cpr=$(kv_get "$lc" pruned)
+cres=$(kv_get "$lc" result); ct=$(kv_epoch "$lc" time); cpr=$(kv_get "$lc" pruned)
+[[ "$cres" =~ ^(ok|failed|skipped)$ ]] || cres=""
 isnum "$ct" || ct=$(epochf "$GB_STATE/last-check")
 pr=""; case "$cpr" in 1) pr=", pruned";; 0) pr=", prune skipped";; esac
 if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then row PROBLEM "last check" "restic check FAILED (latch state/CHECK_FAILED; prune blocked until a check passes): see the log, docs/runbooks if present, then ./check.sh"
@@ -103,7 +111,7 @@ fi
 
 # --- quota / disk (state/quota.status, written by the quota monitor if present)
 q="$GB_STATE/quota.status"
-dpct=$(kv_get "$q" drive_pct); kpct=$(kv_get "$q" disk_pct); qt=$(kv_get "$q" time); kpath=$(kv_get "$q" disk_path)
+dpct=$(kv_num "$q" drive_pct); kpct=$(kv_num "$q" disk_pct); qt=$(kv_epoch "$q" time); kpath=$(kv_get "$q" disk_path | cut -c1-80)
 if isnum "$dpct" || isnum "$kpct"; then
   det="Drive ${dpct:-?}% used, local disk ${kpct:-?}% used${kpath:+ ($kpath)}, measured $(ago "$qt")"
   worst=0; isnum "$dpct" && worst=$dpct; isnum "$kpct" && (( kpct > worst )) && worst=$kpct
@@ -114,7 +122,8 @@ else row OK "quota/disk" "unknown (no state/quota.status yet; written by the quo
 
 # --- test restore (state/test-restore.result from test-restore.sh, else state/last-test-restore)
 tr="$GB_STATE/test-restore.result"
-tres=$(kv_get "$tr" result); tt=$(kv_get "$tr" time); tf=$(kv_get "$tr" files); tm=$(kv_get "$tr" mismatches)
+tres=$(kv_get "$tr" result); tt=$(kv_epoch "$tr" time); tf=$(kv_num "$tr" files); tm=$(kv_num "$tr" mismatches)
+[[ "$tres" =~ ^(ok|failed)$ ]] || tres=""
 isnum "$tt" || { tt=$(epochf "$GB_STATE/last-test-restore"); [[ -n "$tt" && -z "$tres" ]] && tres=ok; }
 weekly=""; [[ "${TEST_RESTORE_WEEKDAY:-}" =~ ^[0-6]$ ]] && weekly=1
 if [[ "$tres" == failed ]]; then row PROBLEM "test restore" "FAILED at $(at "$tt") (${tf:-?} files restored, ${tm:-?} mismatches): see state/test-restore-result.txt and the log; rerun ./test-restore.sh"
@@ -126,8 +135,9 @@ elif [[ -n "$ok_t" ]] && isnum "$first" && (( now - first > 35 * 86400 )); then 
 else row OK "test restore" "not yet (runs once after the first hourly backup, then $([[ -n $weekly ]] && echo weekly || echo monthly))"; fi
 
 # --- Drive report upload (state/report-upload.status from report.sh)
-ru="$GB_STATE/report-upload.status"; rres=$(kv_get "$ru" result); rt=$(kv_get "$ru" time)
-if [[ "${DRIVE_REPORT:-1}" != 1 ]]; then row OK "drive report" "disabled (DRIVE_REPORT=0)"
+ru="$GB_STATE/report-upload.status"; rres=$(kv_get "$ru" result); rt=$(kv_epoch "$ru" time); rstage=$(kv_get "$ru" stage)
+if [[ "$rres" == failed && "$rstage" == build ]]; then row WARN "drive report" "latest-backup-report.txt could not be built $(ago "$rt") (report.sh error, see the log); retried after the next hourly backup"
+elif [[ "${DRIVE_REPORT:-1}" != 1 ]]; then row OK "drive report" "disabled (DRIVE_REPORT=0)"
 elif ! is_rclone_repo; then row OK "drive report" "written locally only (not an rclone: repository): state/latest-backup-report.txt"
 elif [[ "$rres" == failed ]]; then row WARN "drive report" "upload of latest-backup-report.txt FAILED $(ago "$rt"); retried after the next hourly backup (see the log)"
 elif [[ "$rres" == ok ]]; then row OK "drive report" "latest-backup-report.txt uploaded $(ago "$rt")"

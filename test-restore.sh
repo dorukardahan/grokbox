@@ -14,16 +14,23 @@ for a in "$@"; do case "$a" in --weekly) WEEKLY=1;; -h|--help) sed -n 2,10p "$0"
 MODE=$([[ $WEEKLY == 1 ]] && echo weekly || echo once)
 RESULT="$GB_STATE/test-restore.result"
 fail() {  # fail MESSAGE [files] [mismatches]: alert, record the failure, exit 6 (the trap removes the restore dir)
+  trap - ERR
+  [[ "$BASHPID" == "$$" ]] || exit 1   # inside a $(...) subshell: only fail the substitution; the caller's || reports it
   alert "TEST RESTORE FAILED ($MODE): $1"
   kv_write "$RESULT" "result=failed" "time=$(date +%s)" "files=${2:-0}" "mismatches=${3:-0}" "snapshot=${SNAP:0:8}"
   exit 6; }
+# Every failure, including setup steps and restic calls that fail or time out, ends in fail(): a stale
+# result=ok must never outlive a failed attempt. (Lock contention below is not a failure: exit 75.)
+# shellcheck disable=SC2154
+trap 'fail "unexpected failure rc=$? at line $LINENO: $BASH_COMMAND"' ERR
 if [[ "${GB_LOCK_HELD:-0}" != 1 ]]; then
   exec 9>"$GB_STATE/backup.lock"
   flock -w "${LOCK_WAIT:-3600}" 9 || { log "test-restore ($MODE): backup lock busy; not run now"; exit 75; }
   took_lock test-restore "$MODE"
 fi
 if [[ -z "$SNAP" ]]; then
-  SNAP=$(R snapshots --host "$BACKUP_HOST" --tag auto --json 2>>"$LOG" | python3 -c 'import json,sys;s=sorted(json.load(sys.stdin),key=lambda x:x["time"]);print(s[-1]["id"] if s else "")')
+  SNAP=$(R snapshots --host "$BACKUP_HOST" --tag auto --json 2>>"$LOG" | python3 -c 'import json,sys;s=sorted(json.load(sys.stdin),key=lambda x:x["time"]);print(s[-1]["id"] if s else "")') \
+    || fail "cannot list snapshots: restic snapshots failed or timed out, rc=$? (124 = timed out; see $LOG)"
   [[ -n "$SNAP" ]] || { log "test-restore: no hourly snapshot yet; nothing to test"; exit 0; }
 fi
 mkdir -p "$RESTORE_BASE"
@@ -31,7 +38,8 @@ T="$RESTORE_BASE/restore-test-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$T"; chmod 700 
 work=$(mktemp -d); chmod 700 "$work"; trap 'rm -rf "$work" "$T"' EXIT
 log "test-restore ($MODE): snapshot ${SNAP:0:8} -> $T"
 # full listing of the snapshot (JSON lines) -> critical paths + random small files
-R ls --json "$SNAP" > "$work/ls.jsonl" 2>>"$LOG"
+R ls --json "$SNAP" > "$work/ls.jsonl" 2>>"$LOG" \
+  || fail "cannot read snapshot ${SNAP:0:8}: restic ls failed or timed out, rc=$? (124 = timed out; see $LOG)"
 python3 - "$work/ls.jsonl" "${TEST_RESTORE_RANDOM_FILES:-25}" "$GB_CONFIG" "$GB_STAGING/brain" "$GB_STAGING/server-export" "$GB_STAGING/sqlite" "${TEST_RESTORE_PATHS[@]}" > "$work/includes.txt" <<'PY'
 import json,sys,random
 files=[]; known=set()

@@ -10,12 +10,7 @@ source "$(dirname "$0")/lib.sh"; set +e; trap - ERR
 [[ "${1:-}" == --doctor ]] && exec "$GB_DIR/doctor.sh" "${@:2}"
 R_TIMEOUT=300   # status must answer quickly even if Drive hangs
 ts(){ [[ -s "$1" ]] && date -d "@$(cat "$1")" '+%F %H:%M %Z' || echo never; }
-if [[ "${1:-}" == --ack ]]; then
-  rm -f "$GB_STATE/alert-seen"   # new incident: repeats of an acknowledged alert are recorded again
-  if [[ -s "$GB_STATE/ALERT" ]]; then cat "$GB_STATE/ALERT" >> "$GB_LOGS/alerts-acked.log"; rm -f "$GB_STATE/ALERT"; echo "alerts acknowledged"
-  else echo "no alerts"; fi
-  exit 0
-fi
+if [[ "${1:-}" == --ack ]]; then alert_ack; exit 0; fi   # under state/alert.lock; also starts a new dedupe incident
 problems=0
 if [[ -s "$GB_STATE/ALERT" ]]; then
   problems=1
@@ -67,7 +62,7 @@ else problems=1; echo "!! Scheduler: NOT running (run install.sh --schedule)"; f
 if [[ ! -s "$RESTIC_PASSWORD_FILE" ]]; then problems=1; echo "!! credentials: restic password file missing ($RESTIC_PASSWORD_FILE); see AGENTS.md step 3"; fi
 if is_rclone_repo && [[ ! -s "$RCLONE_CONFIG" ]]; then problems=1; echo "!! credentials: rclone config missing ($RCLONE_CONFIG); run auth-gdrive.sh"; fi
 if [[ "$(kv_get "$GB_STATE/report-upload.status" result)" == failed ]]; then
-  problems=1; echo "!! Drive report: upload of latest-backup-report.txt FAILED at $(date -d "@$(kv_get "$GB_STATE/report-upload.status" time | tr -cd 0-9)" '+%F %H:%M %Z' 2>/dev/null || echo ?) (see $LOG; retried after the next hourly backup)"; fi
+  problems=1; echo "!! Drive report: $([[ "$(kv_get "$GB_STATE/report-upload.status" stage)" == build ]] && echo build || echo upload) of latest-backup-report.txt FAILED at $(date -d "@$(kv_epoch "$GB_STATE/report-upload.status" time)" '+%F %H:%M %Z' 2>/dev/null || echo ?) (see $LOG; retried after the next hourly backup)"; fi
 if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then problems=1; echo "!! CHECK FAILED latch set: prune blocked until a passing integrity check"; fi
 if [[ -e "$SQLITE_LATCH" ]]; then problems=1; echo "!! SQLITE LATCH set ($(ts "$SQLITE_LATCH")): SQLite staging failed; forget/prune blocked until a fully successful hourly backup"; fi
 if [[ -s "$GB_STATE/last-success" ]]; then   # test restore: monthly, so allow 35 days (grace counted from first start)

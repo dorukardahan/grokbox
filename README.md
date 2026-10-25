@@ -187,7 +187,7 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 | `PRIVACY.md` | privacy policy (also used as the OAuth consent-screen policy URL) |
 | `docs/health-and-alerts.md` | doctor.sh, weekly test restore, alert dedupe + `ALERT_HOOK`, expected bots, Drive report |
 | `tests/smoke.sh` | local end-to-end test |
-| `tests/fable.sh` | offline tests for doctor.sh, weekly test restore, alert dedupe/hook, expected bots, Drive report (fake rclone) |
+| `tests/health.sh` | offline tests for doctor.sh, weekly test restore, alert dedupe/hook, expected bots, Drive report (fake rclone) |
 | `secrets/` (chmod 700), `state/`, `logs/`, `staging/`, `cache/`, `bin/` | runtime data, gitignored |
 
 ## License
