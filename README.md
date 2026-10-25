@@ -56,6 +56,7 @@ Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md
 | every hour at :17 | full snapshot + brain export + SQLite copies + forget | `auto` | hourly 24, daily 30, weekly 12, monthly 12 |
 | every 15 min | quick snapshot, same roots/excludes (unchanged files are only stat'ed) | `quick` | everything of the last 24 h |
 | once, after the first hourly | `test-restore.sh` (real restore of a sample + checksum verify, then deleted) | | |
+| weekly, Sunday 02:20 | `test-restore.sh --weekly` (critical files + sample, SHA-256 compare with live files); `TEST_RESTORE_WEEKDAY` / `TEST_RESTORE_AT` | | |
 | daily 04:40 | `check.sh`: forget both tags, prune, `restic check --read-data-subset 5%`; on day 1 of a month also a test restore | | |
 | hourly :50 | watchdog: ALERT if no successful hourly snapshot for 3 h | | |
 
@@ -83,10 +84,17 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
 - **Drive trash for forget/prune** (`PRUNE_USE_TRASH=1`): repository files deleted by forget/prune go to the Drive trash
   (recoverable ~30 days; they count against the quota until Google empties the trash). Ordinary backups skip the trash.
   On by default; set `PRUNE_USE_TRASH=0` in `config.env` to delete at once instead.
-- **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. No e-mail is sent:
-  the box cannot send messages on its own. Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
+- **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. The same
+  alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). No e-mail is sent by default: the box
+  cannot send messages on its own; an optional `ALERT_HOOK` command (mail, webhook) can be configured ([docs/health-and-alerts.md](docs/health-and-alerts.md)).
+  Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
   scheduler is noticed within a day.
+- **Health check, weekly test restore, Drive report, expected bots** ([docs/health-and-alerts.md](docs/health-and-alerts.md)): `./doctor.sh`
+  (or `status.sh --doctor`, `--json`) is one screen of OK / WARN / PROBLEM lines with exit 0/1/2; `test-restore.sh --weekly` restores a
+  sample plus the critical files every week and compares SHA-256 with the live files; `report.sh` uploads a small
+  `latest-backup-report.txt` next to the restic folder in Drive after every hourly backup; `EXPECTED_BOTS` lists bots that must be
+  in every server-side export.
 - **Optional second copy** (not set up by default): the Drive repository is the only copy. For a second one, use a restic repository on
   another provider and `restic copy` into it on a schedule (`restic -r <second> copy --from-repo rclone:<remote>:<folder>`); keep its
   password outside the box too.
@@ -157,7 +165,10 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 | `check.sh` | daily forget + prune + check; monthly test restore |
 | `test-restore.sh` | real restore of a sample + checksum verification, then deleted |
 | `restore.sh` | `list`, `ls`, restore into a restore dir, `--missing-only` |
-| `status.sh` | alerts, last runs, scheduler, snapshots; `--local`, `--ack` |
+| `status.sh` | alerts, last runs, scheduler, snapshots; `--local`, `--ack`, `--doctor` |
+| `doctor.sh` | one-screen health check: OK / WARN / PROBLEM per topic, exit 0/1/2; `--online`, `--json` |
+| `report.sh` | writes `latest-backup-report.txt` and uploads it next to the restic folder in Drive (`DRIVE_REPORT`) |
+| `expected-bots.sh` | checks the `EXPECTED_BOTS` roster against the latest server-side export; `--alert` |
 | `scheduler.sh` | cron replacement loop; re-execs itself on code/config change |
 | `lib.sh` | shared helpers (config loading, alerts, exclude building, guards) |
 | `manifest.py` | file count / bytes / newest mtime for the guard |
@@ -174,7 +185,9 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |
 | `PRIVACY.md` | privacy policy (also used as the OAuth consent-screen policy URL) |
+| `docs/health-and-alerts.md` | doctor.sh, weekly test restore, alert dedupe + `ALERT_HOOK`, expected bots, Drive report |
 | `tests/smoke.sh` | local end-to-end test |
+| `tests/fable.sh` | offline tests for doctor.sh, weekly test restore, alert dedupe/hook, expected bots, Drive report (fake rclone) |
 | `secrets/` (chmod 700), `state/`, `logs/`, `staging/`, `cache/`, `bin/` | runtime data, gitignored |
 
 ## License

@@ -1,28 +1,38 @@
 #!/usr/bin/env bash
-# Real test restore: pulls a sample out of a snapshot into $RESTORE_BASE/restore-test-<date>/, verifies
-# every restored file against the snapshot's own metadata and, where the live file is unchanged since
-# the snapshot (same size + mtime), against the live file's SHA-256. Then deletes the restore dir.
-#   test-restore.sh [SNAPSHOT]     default: latest hourly (tag auto) snapshot
-# Sample: TEST_RESTORE_PATHS (if present), the staged brain export + SQLite copies, plus
-# TEST_RESTORE_RANDOM_FILES random files (< 64 MB) from anywhere in the snapshot.
-# Result: state/last-test-restore (+ state/test-restore-result.txt); any failure -> state/ALERT.
+# Real test restore: pulls a sample out of a snapshot into a private (chmod 700) $RESTORE_BASE/restore-test-<date>/,
+# verifies every restored file against the snapshot's own metadata and, where the live file is unchanged since
+# the snapshot (same size + mtime), against the live file's SHA-256. Then deletes the restore dir (trap).
+#   test-restore.sh [--weekly] [SNAPSHOT]     default: latest hourly (tag auto) snapshot
+# Sample: critical files first (the config file, TEST_RESTORE_PATHS, the staged brain + server exports and
+# SQLite copies, if in the snapshot), plus TEST_RESTORE_RANDOM_FILES random files (< 64 MB) from anywhere.
+# --weekly: run by scheduler.sh once per week (TEST_RESTORE_WEEKDAY / TEST_RESTORE_AT); same checks.
+# Result: state/test-restore.result (result=ok|failed, time, files, mismatches), state/test-restore-result.txt,
+# state/last-test-restore on success; any failure -> state/ALERT. Exit 75 = backup lock busy (scheduler retries).
 source "$(dirname "$0")/lib.sh"; need_creds
+WEEKLY=0; SNAP=""
+for a in "$@"; do case "$a" in --weekly) WEEKLY=1;; -h|--help) sed -n 2,10p "$0"; exit 0;; *) SNAP="$a";; esac; done
+MODE=$([[ $WEEKLY == 1 ]] && echo weekly || echo once)
+RESULT="$GB_STATE/test-restore.result"
+fail() {  # fail MESSAGE [files] [mismatches]: alert, record the failure, exit 6 (the trap removes the restore dir)
+  alert "TEST RESTORE FAILED ($MODE): $1"
+  kv_write "$RESULT" "result=failed" "time=$(date +%s)" "files=${2:-0}" "mismatches=${3:-0}" "snapshot=${SNAP:0:8}"
+  exit 6; }
 if [[ "${GB_LOCK_HELD:-0}" != 1 ]]; then
-  exec 9>"$GB_STATE/backup.lock"; flock -w 3600 9 || { log "test-restore: lock busy for 1h; skip"; exit 0; }
-  took_lock test-restore
+  exec 9>"$GB_STATE/backup.lock"
+  flock -w "${LOCK_WAIT:-3600}" 9 || { log "test-restore ($MODE): backup lock busy; not run now"; exit 75; }
+  took_lock test-restore "$MODE"
 fi
-SNAP="${1:-}"
 if [[ -z "$SNAP" ]]; then
   SNAP=$(R snapshots --host "$BACKUP_HOST" --tag auto --json 2>>"$LOG" | python3 -c 'import json,sys;s=sorted(json.load(sys.stdin),key=lambda x:x["time"]);print(s[-1]["id"] if s else "")')
   [[ -n "$SNAP" ]] || { log "test-restore: no hourly snapshot yet; nothing to test"; exit 0; }
 fi
 mkdir -p "$RESTORE_BASE"
-T="$RESTORE_BASE/restore-test-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$T"
-work=$(mktemp -d); trap 'rm -rf "$work" "$T"' EXIT
-log "test-restore: snapshot ${SNAP:0:8} -> $T"
-# full listing of the snapshot (JSON lines) -> pick random small files
+T="$RESTORE_BASE/restore-test-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$T"; chmod 700 "$T"   # private: restored data may be sensitive
+work=$(mktemp -d); chmod 700 "$work"; trap 'rm -rf "$work" "$T"' EXIT
+log "test-restore ($MODE): snapshot ${SNAP:0:8} -> $T"
+# full listing of the snapshot (JSON lines) -> critical paths + random small files
 R ls --json "$SNAP" > "$work/ls.jsonl" 2>>"$LOG"
-python3 - "$work/ls.jsonl" "${TEST_RESTORE_RANDOM_FILES:-25}" "$GB_STAGING/brain" "$GB_STAGING/sqlite" "${TEST_RESTORE_PATHS[@]}" > "$work/includes.txt" <<'PY'
+python3 - "$work/ls.jsonl" "${TEST_RESTORE_RANDOM_FILES:-25}" "$GB_CONFIG" "$GB_STAGING/brain" "$GB_STAGING/server-export" "$GB_STAGING/sqlite" "${TEST_RESTORE_PATHS[@]}" > "$work/includes.txt" <<'PY'
 import json,sys,random
 files=[]; known=set()
 fixed=sys.argv[3:]
@@ -40,10 +50,9 @@ for f in fixed:
     if f in known: print(f)
 for p in files[:int(sys.argv[2])]: print(p)
 PY
-if [[ ! -s "$work/includes.txt" ]]; then
-  alert "TEST RESTORE FAILED: nothing in snapshot ${SNAP:0:8} to sample (empty snapshot?)"; exit 6; fi
+if [[ ! -s "$work/includes.txt" ]]; then fail "nothing in snapshot ${SNAP:0:8} to sample (empty snapshot?)"; fi
 R restore "$SNAP" --target "$T" --include-file "$work/includes.txt" --verify >>"$LOG" 2>&1 \
-  || { alert "TEST RESTORE FAILED: restic restore of ${SNAP:0:8} returned an error (see $LOG)"; exit 6; }
+  || fail "restic restore of ${SNAP:0:8} returned an error (see $LOG)"
 res=$(python3 - "$work/ls.jsonl" "$work/includes.txt" "$T" <<'PY'
 import json,sys,os,hashlib,re
 meta={}
@@ -74,10 +83,13 @@ for p,n in meta.items():
     else: c["bad"]+=1; bad.append("content differs from unchanged live file: "+p)
 print(json.dumps(c)); [print("BAD", b) for b in bad[:20]]
 PY
-) || { alert "TEST RESTORE FAILED: verification script error"; exit 6; }
+) || fail "verification script error"
 summary=$(head -1 <<<"$res")
-{ echo "$(date '+%F %T %Z') snapshot ${SNAP:0:8}"; echo "$res"; } > "$GB_STATE/test-restore-result.txt"
+{ echo "$(date '+%F %T %Z') snapshot ${SNAP:0:8} ($MODE)"; echo "$res"; } > "$GB_STATE/test-restore-result.txt"
 log "test-restore result: $summary"
-ok=$(python3 -c 'import json,sys;c=json.loads(sys.argv[1]);print(int(c["missing"]==0 and c["bad"]==0 and c["restored"]>0))' "$summary")
-if [[ $ok == 1 ]]; then date +%s > "$GB_STATE/last-test-restore"; log "test restore OK (restore dir removed)"
-else alert "TEST RESTORE FAILED for ${SNAP:0:8}: $summary (details: state/test-restore-result.txt)"; exit 6; fi
+read -r ok files mism < <(python3 -c 'import json,sys;c=json.loads(sys.argv[1]);print(int(c["missing"]==0 and c["bad"]==0 and c["restored"]>0),c["restored"],c["missing"]+c["bad"])' "$summary")
+if [[ $ok == 1 ]]; then
+  date +%s > "$GB_STATE/last-test-restore"
+  kv_write "$RESULT" "result=ok" "time=$(date +%s)" "files=$files" "mismatches=0" "snapshot=${SNAP:0:8}"
+  log "test restore OK ($MODE, $files files verified; restore dir removed)"
+else fail "${SNAP:0:8}: $summary (details: state/test-restore-result.txt)" "$files" "$mism"; fi
