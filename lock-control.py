@@ -97,6 +97,14 @@ def force(path):
                 while time.monotonic() < deadline:
                     if len(poll.poll(100)) == len(pinned):
                         break
+        deadline = time.monotonic() + 2
+        remaining = holders(path)
+        while remaining and time.monotonic() < deadline:
+            time.sleep(.05)
+            remaining = holders(path)
+        if remaining:
+            raise RuntimeError('lock still held after termination by PIDs: ' +
+                               ', '.join(map(str, remaining)))
         print('Verified lock job terminated (including inherited holders and descendants).')
     finally:
         for fd in pinned.values():
@@ -121,6 +129,8 @@ if __name__ == '__main__':
     else:
         try:
             if args.action == 'stop':
+                if not hasattr(os, 'pidfd_open') or not hasattr(signal, 'pidfd_send_signal'):
+                    raise RuntimeError('pidfd support is required; refusing unsafe scheduler stop')
                 fd = os.pidfd_open(args.pid)
                 try:
                     if not holds(args.pid, args.path):
@@ -130,5 +140,5 @@ if __name__ == '__main__':
                     os.close(fd)
             else:
                 force(args.path)
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, AttributeError) as exc:
             parser.exit(1, f'{exc}\n')

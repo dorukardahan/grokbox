@@ -103,7 +103,10 @@ if [[ $RESTART == 1 ]]; then
     cd "$1" || exit 1; exec 9>>"$2/backup.lock"
     until flock -n 9; do sleep 30; done      # no backup/check/restore running now (we hold the lock)
     source "$1/lib.sh"
-    p=$(sched_pid); [ -n "$p" ] && python3 "$1/lock-control.py" stop "$2/scheduler.lock" "$p" 2>/dev/null
+    p=$(sched_pid)
+    if [[ -n "$p" ]]; then
+      python3 "$1/lock-control.py" stop "$2/scheduler.lock" "$p" 2>/dev/null || log "scheduler stop refused or failed; continuing restart handoff"
+    fi
     sleep 2; flock -u 9; exec 9>&-
     setsid nohup "$1/scheduler.sh" >>"$3/scheduler.out" 2>&1 </dev/null & disown
     echo "[$(date "+%F %T %Z")] scheduler restarted with current code (handoff helper)" >> "$3/backup-$(date +%Y-%m).log"

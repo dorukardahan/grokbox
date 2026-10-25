@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Daily: forget per retention policy (hourly `auto` chain + `quick` chain separately), prune, verify
+# Daily: forget per retention policy (hourly `auto` chain + `quick` chain separately), verify, prune
 # repo structure + a random subset of data. Monthly (day 1) or --test-restore: real test restore.
 source "$(dirname "$0")/lib.sh"; need_creds
 exec 9>"$GB_STATE/backup.lock"
@@ -17,10 +17,14 @@ if [[ -e "$GUARD_LATCH" ]]; then
   alert "check: forget/prune SKIPPED, stale guard latch ($GUARD_LATCH) is set; it clears after a successful hourly backup"
 elif [[ -e "$SQLITE_LATCH" ]]; then
   alert "check: forget/prune SKIPPED, SQLite staging failed earlier ($SQLITE_LATCH is set; it clears after a fully successful hourly backup)"
-else
-  prepare_retention || { alert "check: retention skipped; incomplete snapshot tags could not be repaired"; exit 1; }
+elif [[ -e "$GB_STATE/CHECK_FAILED" ]]; then
+  log "check: forget skipped; integrity check failure latch is set"
+elif prepare_retention; then
   RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
   RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+  RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
+else
+  alert "check: retention skipped; incomplete snapshot tags could not be repaired"
 fi
 # Never prune a repository until this run's integrity check passes.
 if R_TIMEOUT="$RESTIC_TIMEOUT_CHECK" R check --read-data-subset "$CHECK_SUBSET" >>"$LOG" 2>&1; then

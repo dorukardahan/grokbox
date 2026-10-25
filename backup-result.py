@@ -11,6 +11,9 @@ with open(stream) as source:
         try:
             entry = json.loads(line)
         except ValueError:
+            malformed |= line.lstrip().startswith(('{', '['))
+            continue
+        if not isinstance(entry, dict):
             malformed = True
             continue
         if entry.get('message_type') == 'summary':

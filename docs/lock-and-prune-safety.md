@@ -18,20 +18,22 @@ child within the job budget. Check jobs receive a longer budget because check,
 prune, and other repository calls execute sequentially.
 
 Hourly results are atomically written to `state/last-backup.result`. Timeout 124
-means timeout/termination; 137 means KILL after the termination grace. Prune waits
+means timeout/termination; 137 means SIGKILL, either timeout escalation or an external kill (such as OOM). Prune waits
 for a complete hourly backup so interrupted uploads' packs can be reused.
 Unknown or failed results also block prune. Quick jobs cannot clear this gate.
 
 Snapshots start tagged `incomplete`; only completed snapshots gain `auto` or
 `quick`. Retention also strips those tags from legacy incomplete snapshots.
-Incomplete snapshots remain available for manual inspection and are not counted
-by retention. The first unreadable-file run is incomplete. Repeated identical
+Incomplete snapshots are excluded from the complete-snapshot retention counts.
+A separate `forget --tag incomplete --keep-within 7d` policy bounds their history
+to seven days relative to the newest incomplete snapshot in each retention group.
+Safety latches also block this policy. The first unreadable-file run is incomplete. Repeated identical
 permission-denied errors on regular files may complete with warnings on later
 runs, listing up to 20 omitted paths. Directory and unclassified errors never
 qualify. A changed error set is incomplete again.
 
 A failed integrity check sets `state/CHECK_FAILED`. The next passing check clears
-it. Prune always follows a passing check in the same run, and also respects the
+it. While set, it blocks forget as well as prune. Prune always follows a passing check in the same run, and also respects the
 backup, stale-guard and SQLite gates. `state/last-check.result` records the check
 result and whether prune succeeded.
 

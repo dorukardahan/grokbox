@@ -127,33 +127,67 @@ TAGS=(--tag incomplete --tag "profile=$BACKUP_PROFILE" --tag "files=$F" --tag "b
 log "backup start mode=$MODE profile=$BACKUP_PROFILE files=$F bytes=$B parent=${PARENT[1]:-none}"
 rc=0   # `|| rc=$?` keeps both errexit and the ERR trap quiet for restic's rc=3 (partial but valid snapshot)
 events="$GB_LOGS/backup-$MODE.json.tmp"
-R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --json --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
+BACKUP_STARTED=$(date +%s)
+RESTIC_PROGRESS_FPS=0.01 R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --json --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
   "${PATHS[@]}" >"$events" 2>&1 || rc=$?
-cat "$events" >> "$LOG"
+python3 - "$events" >> "$LOG" <<'PYLOG'
+import json, sys
+for line in open(sys.argv[1]):
+    try:
+        entry = json.loads(line)
+    except ValueError:
+        entry = {}
+    if not isinstance(entry, dict) or entry.get('message_type') != 'status':
+        sys.stdout.write(line)
+PYLOG
 mapfile -t summary < <(python3 "$GB_DIR/backup-result.py" "$events" "$GB_STATE/unreadable-$MODE.json")
 SNAPSHOT="${summary[1]:-}"; FILES="${summary[2]:-0}"; BYTES="${summary[3]:-0}"; ADDED="${summary[4]:-0}"; UNREADABLE="${summary[5]:-0}"
 rm -f "$events"
 if [[ $rc == 124 || $rc == 137 ]]; then
   RESULT=timeout
-  ending="timed out and terminated"; [[ $rc == 137 ]] && ending="killed after the 60s termination grace"
-  alert "restic backup ($MODE) TIMED OUT after $RESTIC_TIMEOUT_BACKUP: $ending (rc=$rc); interrupted uploads resume next run; prune waits for a complete hourly backup"
+  outcome="TIMED OUT"; ending="timed out and terminated"
+  if [[ $rc == 137 ]]; then
+    outcome="INTERRUPTED"
+    budget=$(python3 - "$RESTIC_TIMEOUT_BACKUP" <<'PYTIME'
+import re, sys
+m = re.fullmatch(r'(\d+(?:\.\d+)?)([smhd]?)', sys.argv[1])
+print(float(m[1]) * {'':1, 's':1, 'm':60, 'h':3600, 'd':86400}[m[2]] if m else 0)
+PYTIME
+)
+    ending="killed after timeout elapsed (possibly termination grace or external SIGKILL)"
+    if python3 - "$budget" "$(( $(date +%s) - BACKUP_STARTED ))" <<'PYTIME'
+import sys
+sys.exit(0 if float(sys.argv[1]) == 0 or float(sys.argv[2]) < float(sys.argv[1]) else 1)
+PYTIME
+    then ending="killed before the timeout elapsed (possible OOM or external SIGKILL)"; fi
+  fi
+  alert "restic backup ($MODE) $outcome (timeout limit $RESTIC_TIMEOUT_BACKUP): $ending (rc=$rc); interrupted uploads resume next run; prune waits for a complete hourly backup"
   exit "$rc"
 fi
 if [[ $rc != 0 && $rc != 3 ]]; then alert "restic backup ($MODE) failed rc=$rc (see $LOG)"; exit "$rc"; fi
 if [[ $rc == 3 && "${summary[0]:-}" != warnings ]]; then
   RESULT=incomplete; date +%s > "$GB_STATE/last-partial"
-  alert "restic backup ($MODE) created an INCOMPLETE snapshot; excluded from retention; last-success unchanged. Unreadable paths (up to 20): ${summary[6]:-unknown; see log}"
+  alert "restic backup ($MODE) created an INCOMPLETE snapshot; excluded from complete-snapshot retention (kept for 7 days); last-success unchanged. Unreadable paths (up to 20): ${summary[6]:-unknown; see log}"
   exit 6
 fi
-if [[ -z "$SNAPSHOT" ]] || ! R tag --remove incomplete --add "$MODE" "$SNAPSHOT" >>"$LOG" 2>&1; then
+promoted=0
+if [[ -n "$SNAPSHOT" ]]; then
+  for attempt in 1 2; do
+    if R tag --remove incomplete --add "$MODE" "$SNAPSHOT" >>"$LOG" 2>&1; then promoted=1; break; fi
+    log "backup ($MODE): snapshot promotion attempt $attempt failed"
+  done
+fi
+if [[ $promoted != 1 ]]; then
   RESULT=incomplete; date +%s > "$GB_STATE/last-partial"
   alert "backup ($MODE): could not promote snapshot to complete; retention skipped"; exit 6
 fi
-# Tagging changes the snapshot id; report the promoted id, never its removed predecessor.
-SNAPSHOT=$(R snapshots --host "$BACKUP_HOST" --tag "$MODE" --latest 1 --json 2>>"$LOG" | python3 -c 'import json,sys;s=json.load(sys.stdin);print(s[-1]["short_id"] if s else "")')
+# Tagging changes the snapshot id; prefer the promoted id when the lookup succeeds.
+if promoted_id=$(R snapshots --host "$BACKUP_HOST" --tag "$MODE" --latest 1 --json 2>>"$LOG" | python3 -c 'import json,sys;s=json.load(sys.stdin);print(s[-1]["short_id"] if s else "")') && [[ -n "$promoted_id" ]]; then
+  SNAPSHOT="$promoted_id"
+else log "backup ($MODE): promoted snapshot ID lookup failed; result retains pre-tag ID $SNAPSHOT"; fi
 RESULT=complete
 if [[ $rc == 3 ]]; then
-  alert "backup ($MODE) complete with warnings: persistently unreadable regular files omitted (up to 20): ${summary[6]}"
+  log "backup ($MODE) complete with warnings: persistently unreadable regular files omitted (up to 20): ${summary[6]}"
 fi
 date +%s > "$GB_STATE/last-success-$MODE"
 if [[ $MODE == auto ]]; then
@@ -165,9 +199,12 @@ log "backup ok mode=$MODE rc=$rc"
 if [[ -n "$NO_FORGET_WHY" ]]; then log "forget skipped: $NO_FORGET_WHY"
 elif [[ -e "$GUARD_LATCH" ]]; then alert "forget skipped: stale guard latch ($GUARD_LATCH) is set"
 elif [[ -e "$SQLITE_LATCH" ]]; then alert "forget skipped: SQLite staging failed earlier ($SQLITE_LATCH is set; clears after a fully successful hourly backup)"
+elif [[ -e "$GB_STATE/CHECK_FAILED" ]]; then log "forget skipped: integrity check failure latch is set"
 elif [[ $FORGET == 1 && $MODE == auto ]]; then   # forget only; the actual prune happens daily in check.sh
-  prepare_retention || { alert "forget skipped: incomplete snapshot tags could not be repaired"; exit 1; }
-  RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
-  RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+  if prepare_retention; then
+    RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
+    RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+    RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
+  else alert "forget skipped: incomplete snapshot tags could not be repaired"; fi
 fi
 exit 0

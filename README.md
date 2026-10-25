@@ -56,7 +56,7 @@ Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md
 | every hour at :17 | full snapshot + brain export + SQLite copies + forget | `auto` | hourly 24, daily 30, weekly 12, monthly 12 |
 | every 15 min | quick snapshot, same roots/excludes (unchanged files are only stat'ed) | `quick` | everything of the last 24 h |
 | once, after the first hourly | `test-restore.sh` (real restore of a sample + checksum verify, then deleted) | | |
-| daily 04:40 | `check.sh`: forget both tags, prune, `restic check --read-data-subset 5%`; on day 1 of a month also a test restore | | |
+| daily 04:40 | `check.sh`: forget by tag, `restic check --read-data-subset 5%`, then prune; on day 1 of a month also a test restore | | |
 | hourly :50 | watchdog: ALERT if no successful hourly snapshot for 3 h | | |
 
 The two tags are forgotten separately, so quick snapshots never disturb the long-term chain. One lock
@@ -69,8 +69,7 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   empty or old; a smaller or subtler rollback can pass. `backup.sh --force "reason"` overrides once (only after a human compared with
   `restore.sh ls latest`). A trip also sets the latch `state/GUARD_TRIPPED`: while it exists no forget/prune runs (backup, `check.sh`);
   only a successful hourly backup (including `--force`) clears it. `status.sh` shows it.
-- **Incomplete snapshots** (restic exit 3, unreadable files): the snapshot is kept, an alert is raised and `state/last-partial` is written,
-  but it is not treated as a good baseline (no `last-success`, no guard baseline update, no forget). `backup.sh` exits 6.
+- **Incomplete snapshots**: snapshots start tagged `incomplete` and gain `auto`/`quick` only on completion. Incomplete runs alert and exit 6 without updating the good baseline; their snapshots are excluded from complete-snapshot retention and kept separately for 7 days. Repeated identical unreadable regular-file permission errors complete with warnings in the log; new error sets alert again.
 - **SQLite staging failures** (failed/timed-out copy): alert; databases without a fresh copy are backed up live instead of being excluded, and forget is skipped for that run.
 - **Uptime + hydration guards**: no backup in the first 15 minutes after boot, or while the platform's hydration log says files are still being copied in.
 - **Consistent SQLite copies** of live databases (SQLite online-backup API) into `staging/sqlite/`, since copying live `.db` files is unsafe.

@@ -49,6 +49,13 @@ A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
     - "stale-computer guard" (exit 4): do NOT force. Tell the owner; compare with ./restore.sh ls latest.
     - "backup.lock held for Nh" or "Scheduler loop has not ticked": a job is hung. Tell the owner; the
       safe restart is ./install.sh --restart-scheduler (waits for the lock).
+    Lock recovery: the timeout normally ends hung jobs automatically (TERM, then KILL after 60 seconds).
+    Use ./install.sh --restart-scheduler --force only when the lock age exceeds
+    RESTIC_TIMEOUT_BACKUP plus grace (for check jobs, allow the sequential check/prune timeout budget),
+    or the scheduler heartbeat is stale by more than 2 hours. Inspect status.sh --local first.
+    Force verifies the actual lock descriptors and terminates that job and its children, including escaped
+    rclone process groups; it refuses a free or unverifiable lock. Never repeatedly force an active upload.
+    Auth re-consent exit 75 means the lock is busy: retry in a few minutes.
     - To test the Drive login without changing anything: ./auth-gdrive.sh --test
     - Any other alert: one line each, with the likely cause.
     Only run ./status.sh --ack after the cause is fixed AND the owner has been told.
@@ -86,10 +93,3 @@ next step for the owner), then Part B. No logs, no message content, no secrets.
 ## First run
 Right after creating the routine, run its steps once. The first export pages back through every
 conversation, so it needs many rounds of B3. After that, each daily run only fetches what is new.
-
-Lock recovery: the timeout normally ends hung jobs automatically (TERM, then KILL after 60 seconds).
-Use `./install.sh --restart-scheduler --force` only when the lock age exceeds
-`RESTIC_TIMEOUT_BACKUP` plus grace (for check jobs, allow the sequential check/prune timeout budget),
-or the scheduler heartbeat is stale by more than 2 hours. Inspect `status.sh --local` first.
-Force verifies the actual lock descriptors and terminates that job and its children, including escaped
-rclone process groups; it refuses a free or unverifiable lock. Never repeatedly force an active upload.
