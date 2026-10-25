@@ -167,7 +167,7 @@ See [docs/runbooks.md](docs/runbooks.md) for step-by-step procedures:
 For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.md](REBUILD.md).
 
 ## CI
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `shellcheck` on all shell scripts and executes `tests/smoke.sh` plus any additional `tests/*.sh` suites on every push and pull request. `install.sh` verifies downloaded `restic` and `rclone` archives against both the repo-pinned [checksums.txt](checksums.txt) and upstream `SHA256SUMS`.
+[`ci/github-actions-ci.yml.example`](ci/github-actions-ci.yml.example) is a ready GitHub Actions workflow (copy it to `.github/workflows/ci.yml` to enable it) that runs `shellcheck` on all shell scripts and executes `tests/smoke.sh` plus any additional `tests/*.sh` suites on every push and pull request. `install.sh` verifies downloaded `restic` and `rclone` archives against both the repo-pinned [checksums.txt](checksums.txt) and upstream `SHA256SUMS`.
 
 ## Files
 | file | what |

@@ -25,8 +25,8 @@ step() { echo; echo "== $*"; }
 PINNED_RESTIC=$(awk -F= '/^PINNED_RESTIC=/{print $2}' "$REPO_DIR/config.env.example")
 PINNED_RCLONE=$(awk -F= '/^PINNED_RCLONE=/{print $2}' "$REPO_DIR/config.env.example")
 
-step "1. GitHub Actions CI workflow (.github/workflows/ci.yml)"
-CI_YML="$REPO_DIR/.github/workflows/ci.yml"
+step "1. GitHub Actions CI workflow (ci/github-actions-ci.yml.example)"
+CI_YML="$REPO_DIR/ci/github-actions-ci.yml.example"
 check "ci.yml exists" test -s "$CI_YML"
 check "ci.yml triggers on push" grep -qE 'push:' "$CI_YML"
 check "ci.yml limits push to main branch" grep -qE 'branches:[[:space:]]*\[main\]' "$CI_YML"
@@ -212,7 +212,7 @@ fi
 
 step "4. README.md and AGENTS.md links"
 check "README.md links docs/runbooks.md" grep -q 'docs/runbooks.md' "$REPO_DIR/README.md"
-check "README.md links .github/workflows/ci.yml" grep -q '\.github/workflows/ci\.yml' "$REPO_DIR/README.md"
+check "README.md links ci/github-actions-ci.yml.example" grep -q 'ci/github-actions-ci\.yml\.example' "$REPO_DIR/README.md"
 check "README.md links checksums.txt" grep -q 'checksums\.txt' "$REPO_DIR/README.md"
 check "AGENTS.md references checksums.txt" grep -q "checksums.txt" "$REPO_DIR/AGENTS.md"
 check "AGENTS.md references docs/runbooks.md" grep -q "docs/runbooks.md" "$REPO_DIR/AGENTS.md"
