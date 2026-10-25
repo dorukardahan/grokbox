@@ -13,6 +13,10 @@ source "$GB_CONFIG"
 : "${RESTIC_TIMEOUT:=3h}" "${RESTIC_TIMEOUT_BACKUP:=12h}" "${RESTIC_TIMEOUT_CHECK:=8h}" "${RCLONE_TIMEOUT:=300}"
 : "${LOCK_ALERT_HOURS:=13}" "${HEARTBEAT_MAX_MIN:=90}" "${PRUNE_USE_TRASH:=1}"
 : "${QUOTA_ALERT_PCT:=90}" "${LOG_RETENTION_DAYS:=0}" "${RESTORE_LOCK_WAIT:=600}"
+: "${ALERT_HOOK:=}" "${ALERT_HOOK_TIMEOUT:=60}" "${ALERT_DEDUPE_HOURS:=24}" "${DRIVE_REPORT:=1}"
+: "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
+[[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
+[[ -v EXPECTED_BOTS ]] || EXPECTED_BOTS=()
 export TZ
 umask 077   # state, logs, staging and restored scratch data are private by default
 mkdir -p "$GB_STATE" "$GB_LOGS" "$GB_STAGING" "$RESTIC_CACHE_DIR"
@@ -21,12 +25,82 @@ LOG="$GB_LOGS/backup-$(date +%Y-%m).log"
 ALERTS_LOG="$GB_LOGS/alerts.log"
 log()  { echo "[$(date '+%F %T %Z')] $*" | tee -a "$LOG" >&2; }
 # alert: loud, persistent failure marker. state/ALERT stays until `status.sh --ack`.
+# Dedupe: the same text goes into ALERT/alerts.log and to the hook once per incident; repeats are only noted
+# in the month log (state/alert-seen holds "key first-seen count"). The incident key ignores the timestamp and
+# every number in the text, so a message whose age, count or pid grows ("held for 13h" -> "14h") stays one
+# incident; the first text is the one recorded, every repeat is logged in full. A new incident starts after
+# `status.sh --ack` (removes alert-seen) or ALERT_DEDUPE_HOURS after the first occurrence. The decision and
+# the state writes happen under state/alert.lock (concurrent callers, --ack); the hook runs after it is released.
 alert(){
-  local msg
-  msg="[$(date '+%F %T %Z')] [$(basename "$0")] $*"
+  local text msg key decision
+  text="[$(basename "$0")] $*"
+  msg="[$(date '+%F %T %Z')] $text"
+  key=$(printf '%s' "$text" | sed 's/[0-9][0-9]*/#/g' | sha256sum | cut -c1-16)
+  decision=$(_alert_record "$key" "$msg")
+  if [[ "$decision" == repeat* ]]; then log "ALERT ($decision, not re-recorded): $*"; return 0; fi
   log "ALERT: $*"
-  echo "$msg" >> "$GB_STATE/ALERT"
-  echo "$msg" >> "$ALERTS_LOG"
+  alert_hook "$msg"
+}
+_alert_record(){  # _alert_record KEY MSG -> "new" or "repeat N, same incident since ..."; locked read-modify-write
+  local key="$1" msg="$2" seen="$GB_STATE/alert-seen" line first=0 count=1 now
+  (
+    exec 7>>"$GB_STATE/alert.lock"; flock -w 30 7 || true   # a stuck lock must never lose an alert
+    now=$(date +%s)
+    line=$(grep -m1 "^$key " "$seen" 2>/dev/null || true)
+    [[ -n "$line" ]] && read -r _ first count <<<"$line"
+    [[ "$first" =~ ^[0-9]{1,10}$ ]] || first=0; [[ "$count" =~ ^[0-9]{1,10}$ ]] || count=1
+    if (( first > 0 && now - first < ${ALERT_DEDUPE_HOURS:-24} * 3600 )); then
+      count=$(( 10#$count + 1 ))
+      { grep -v "^$key " "$seen" 2>/dev/null; echo "$key $first $count"; } > "$seen.tmp.$$" && mv "$seen.tmp.$$" "$seen"
+      echo "repeat $count, same incident since $(date -d "@$first" '+%F %T')"
+    else
+      { grep -v "^$key " "$seen" 2>/dev/null; echo "$key $now 1"; } > "$seen.tmp.$$" && mv "$seen.tmp.$$" "$seen"
+      echo "$msg" >> "$GB_STATE/ALERT"
+      echo "$msg" >> "$ALERTS_LOG"
+      echo new
+    fi
+  )
+}
+# status.sh --ack: acknowledge under the same lock (never interleaves with a concurrent alert()).
+alert_ack(){
+  (
+    exec 7>>"$GB_STATE/alert.lock"; flock -w 30 7 || true
+    rm -f "$GB_STATE/alert-seen"   # new incident: repeats of an acknowledged alert are recorded again
+    if [[ -s "$GB_STATE/ALERT" ]]; then cat "$GB_STATE/ALERT" >> "$GB_LOGS/alerts-acked.log"; rm -f "$GB_STATE/ALERT"; echo "alerts acknowledged"
+    else echo "no alerts"; fi
+  )
+}
+# Optional alert channel (ALERT_HOOK, off by default): the command gets the alert text on stdin and in
+# $GB_ALERT_MSG, runs under a timeout, and its failures are logged but never fatal. GB_IN_ALERT_HOOK stops
+# a hook that itself raises an alert from running the hook again.
+alert_hook(){
+  [[ -n "${ALERT_HOOK:-}" && -z "${GB_IN_ALERT_HOOK:-}" ]] || return 0
+  local rc=0
+  GB_IN_ALERT_HOOK=1 GB_ALERT_MSG="$1" timeout -k 10 "${ALERT_HOOK_TIMEOUT:-60}" bash -c "$ALERT_HOOK" <<<"$1" >>"$GB_LOGS/alert-hook.log" 2>&1 || rc=$?
+  (( rc == 0 )) || log "WARN alert hook exited rc=$rc (124 = killed after ALERT_HOOK_TIMEOUT=${ALERT_HOOK_TIMEOUT}s); see $GB_LOGS/alert-hook.log"
+  return 0
+}
+# Small key=value state files shared between the scripts (last-backup.result, test-restore.result, ...).
+kv_get() {  # kv_get FILE KEY -> value (empty when the file or the key is missing; never fails; NULs dropped)
+  [[ -f "$1" ]] && sed -n "s/^$2=//p" "$1" 2>/dev/null | head -1 | tr -d '\000'; return 0; }
+kv_write() {  # kv_write FILE key=value... (atomic)
+  local f="$1"; shift; printf '%s\n' "$@" > "$f.tmp.$$" && mv "$f.tmp.$$" "$f"; }
+# Numbers from state files are only used after validation: a bounded decimal integer (no sign, no octal
+# surprise from leading zeros, no overflow); epochs must also be plausible (< year 2242). Anything else = unknown.
+num_ok() { [[ "${1:-}" =~ ^[0-9]{1,15}$ ]] && echo $((10#$1)); return 0; }      # num_ok STR -> plain integer or nothing
+epoch_ok() { local v; v=$(num_ok "${1:-}"); [[ -n "$v" ]] && (( v > 0 && v < 8589934592 )) && echo "$v"; return 0; }
+kv_num() { num_ok "$(kv_get "$1" "$2")"; }                                    # kv_num FILE KEY
+kv_epoch() { epoch_ok "$(kv_get "$1" "$2")"; }                                # kv_epoch FILE KEY
+epoch_file() { epoch_ok "$(head -c 32 "$1" 2>/dev/null | tr -d '[:space:]\000')"; }   # epoch_file FILE (one timestamp)
+# Weekly test restore: date of the most recent TEST_RESTORE_WEEKDAY (0=Sunday..6) whose TEST_RESTORE_AT
+# has passed; prints nothing when TEST_RESTORE_WEEKDAY is empty (weekly run off). scheduler.sh runs
+# test-restore.sh --weekly once per slot (due-based, so a slot missed while the box was off is caught up).
+test_restore_slot() {
+  local wd="${TEST_RESTORE_WEEKDAY:-}" back
+  [[ "$wd" =~ ^[0-6]$ ]] || return 0
+  back=$(( ( $(date +%w) - wd + 7 ) % 7 ))
+  if (( back == 0 )) && [[ "$(date +%H:%M)" < "${TEST_RESTORE_AT:-02:20}" ]]; then back=7; fi
+  date -d "-$back days" +%F
 }
 # Unexpected failures (set -e) also raise an alert, not just a silent non-zero exit.
 # shellcheck disable=SC2154
