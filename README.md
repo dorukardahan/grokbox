@@ -82,6 +82,7 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   ticking (`HEARTBEAT_MAX_MIN`, 90 min) while no job holds the lock.
 - **Drive trash for forget/prune** (`PRUNE_USE_TRASH=1`): repository files deleted by forget/prune go to the Drive trash
   (recoverable ~30 days; they count against the quota until Google empties the trash). Ordinary backups skip the trash.
+  On by default; set `PRUNE_USE_TRASH=0` in `config.env` to delete at once instead.
 - **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. No e-mail is sent:
   the box cannot send messages on its own. Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead

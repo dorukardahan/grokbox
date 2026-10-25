@@ -16,7 +16,8 @@ Google OAuth client you create to run it. Last updated: 2026.
   permissions. With `BACKUP_SECRETS=1` (default) credential files other than the restic password are also inside the
   encrypted backup; set `BACKUP_SECRETS=0` to leave them out.
 - **Retention and deletion.** Retention automatically deletes old snapshots according to your config (`KEEP`,
-  `KEEP_QUICK`); deletion bypasses the Drive trash. Remaining data stays in your Drive until you delete the backup folder
+  `KEEP_QUICK`). By default those deleted files go to the Drive trash, where they stay recoverable for about 30 days and
+  count against your Drive quota until Google empties the trash; set `PRUNE_USE_TRASH=0` to delete them at once. Remaining data stays in your Drive until you delete the backup folder
   (default `GrokBox/restic`).
 - **Shared rclone client.** If you choose the fallback `--rclone-default-client`, sign-in uses rclone's own OAuth client,
   which is governed by rclone's and Google's terms, not by this app.

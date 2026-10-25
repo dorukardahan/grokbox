@@ -38,10 +38,11 @@ need_creds() {
 RESTIC_OPTS=(); RESTIC_OPTS_TRASH=()
 if is_rclone_repo; then
   RESTIC_OPTS+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $RCLONE_SERVE_ARGS")
-  # forget/prune delete repository files: with PRUNE_USE_TRASH=1 those deletions go to the Drive trash
+  # forget/prune delete repository files. PRUNE_USE_TRASH=1 (default): those deletions go to the Drive trash
   # (recoverable for ~30 days, but they count against the Drive quota until Google empties the trash).
-  _ta="${RCLONE_SERVE_ARGS//--drive-use-trash=false/}"
-  [[ "${PRUNE_USE_TRASH:-1}" == 1 ]] && _ta="$_ta --drive-use-trash=true"
+  # PRUNE_USE_TRASH=0: they are deleted at once. The flag is always set explicitly (rclone's own default is "trash").
+  _ta="${RCLONE_SERVE_ARGS//--drive-use-trash=false/}"; _ta="${_ta//--drive-use-trash=true/}"
+  if [[ "${PRUNE_USE_TRASH:-1}" == 1 ]]; then _ta="$_ta --drive-use-trash=true"; else _ta="$_ta --drive-use-trash=false"; fi
   RESTIC_OPTS_TRASH+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $_ta")
 fi
 # Every restic call is time-limited (a hung Drive call must not hold backup.lock forever).
