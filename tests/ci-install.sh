@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Offline tests for Lane GEMINI: GitHub Actions CI workflow, pinned archive checksums in install.sh,
+# Offline tests for GitHub Actions CI workflow, pinned archive checksums in install.sh,
 # operational runbooks (repair, untrash, wrong-host rewrite), and README/AGENTS documentation links.
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-gemini.XXXXXX")"
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-ci-install.XXXXXX")"
 [[ "$TMP" == /tmp/* || "$TMP" == "${TMPDIR:-/nonexistent}"/* ]] || { echo "refusing: temp dir $TMP is not under /tmp"; exit 1; }
 cleanup() {
   [[ -n "${KEEP_TMP:-}" ]] && { echo "kept $TMP"; return; }
@@ -28,10 +28,11 @@ PINNED_RCLONE=$(awk -F= '/^PINNED_RCLONE=/{print $2}' "$REPO_DIR/config.env.exam
 step "1. GitHub Actions CI workflow (.github/workflows/ci.yml)"
 CI_YML="$REPO_DIR/.github/workflows/ci.yml"
 check "ci.yml exists" test -s "$CI_YML"
-check "ci.yml triggers on push and pull_request" grep -qE 'push:' "$CI_YML"
+check "ci.yml triggers on push" grep -qE 'push:' "$CI_YML"
+check "ci.yml limits push to main branch" grep -qE 'branches:[[:space:]]*\[main\]' "$CI_YML"
 check "ci.yml triggers on pull_request" grep -qE 'pull_request:' "$CI_YML"
 check "ci.yml sets minimal permissions (contents: read)" grep -qE 'contents:[[:space:]]*read' "$CI_YML"
-check "ci.yml pins actions/checkout@v4" grep -qF 'actions/checkout@v4' "$CI_YML"
+check "ci.yml pins actions/checkout to a commit SHA (# v4)" grep -qE 'actions/checkout@[0-9a-f]{40}[[:space:]]+#[[:space:]]*v4' "$CI_YML"
 check "ci.yml runs shellcheck" grep -q 'shellcheck' "$CI_YML"
 check "ci.yml runs tests/smoke.sh" grep -q 'bash tests/smoke.sh' "$CI_YML"
 check "ci.yml loops over other tests/*.sh files" grep -q 'for t in tests/\*\.sh' "$CI_YML"
@@ -56,7 +57,7 @@ source "$REPO_DIR/config.env.example"
 export RESTIC_REPOSITORY="$TMP/repo"
 CFG
 export GB_CONFIG="$TMP/config.env"
-export RESTIC_BACKUP_PASSWORD="gemini-test-password-$$"
+export RESTIC_BACKUP_PASSWORD="ci-install-test-password-$$"
 
 # Missing entry in checksums.txt when bumping PINNED_RESTIC must fail loudly with hint
 { cat "$TMP/config.env"; echo "PINNED_RESTIC=9.99.9"; } > "$TMP/config-bump.env"
@@ -123,6 +124,11 @@ chmod +x "$TMP/fakebin/curl"
 run_ok "install.sh reuses valid bin/ without downloading" \
   env PATH="$TMP/fakebin:$PATH" GB_CONFIG="$TMP/config-dl.env" GB_CHECKSUMS="$TMP/checksums.good" "$REPO_DIR/install.sh"
 
+# Reuse check when checksums.txt has no entry for the pinned version: valid bin/ must still succeed (exit 0)
+: > "$TMP/checksums.empty"
+run_ok "install.sh exits 0 when bin/ is valid even if checksums.txt has no entry for the pinned version" \
+  env PATH="$TMP/fakebin:$PATH" GB_CONFIG="$TMP/config-dl.env" GB_CHECKSUMS="$TMP/checksums.empty" "$REPO_DIR/install.sh"
+
 # Restore fake curl and test mismatch against pinned checksums.txt (even when upstream SHA256SUMS matches)
 cat > "$TMP/fakebin/curl" <<EOF
 #!/usr/bin/env bash
@@ -162,6 +168,12 @@ PATH="$TMP/fakebin:$PATH" GB_CONFIG="$TMP/config-bad-up.env" GB_CHECKSUMS="$TMP/
 check "install.sh rejects archive when upstream SHA256SUMS mismatches (even if checksums.txt matches)" test "$rc" != 0
 check "no binary installed on upstream checksum mismatch" not test -x "$TMP/bin-bad-up/restic"
 rm -f "$TMP/state/ALERT"
+
+# Also verify relative GB_CHECKSUMS works when downloading (resolves before cd "$tmp")
+printf '%s  %s\n' "$RB_SHA" "$RB_NAME" > "$SRV/rs.sums"
+{ cat "$TMP/config.env"; echo "GB_BIN=\"$TMP/bin-rel\""; } > "$TMP/config-rel.env"
+run_ok "install.sh resolves relative GB_CHECKSUMS before cd into temp dir" \
+  bash -c 'cd "$1" && PATH="$1/fakebin:$PATH" GB_CONFIG="$1/config-rel.env" GB_CHECKSUMS="checksums.good" "$2/install.sh"' _ "$TMP" "$REPO_DIR"
 
 step "3. Runbooks (docs/runbooks.md) and offline restic repair/rewrite verification"
 RB_DOC="$REPO_DIR/docs/runbooks.md"
@@ -206,5 +218,5 @@ check "AGENTS.md references checksums.txt" grep -q "checksums.txt" "$REPO_DIR/AG
 check "AGENTS.md references docs/runbooks.md" grep -q "docs/runbooks.md" "$REPO_DIR/AGENTS.md"
 
 echo
-echo "gemini test: $PASS_N passed, $FAIL_N failed"
+echo "ci-install test: $PASS_N passed, $FAIL_N failed"
 [[ $FAIL_N == 0 ]]

@@ -1,6 +1,6 @@
 # Pinned SHA256 checksums for restic and rclone release archives (linux amd64 + arm64).
 # install.sh verifies each downloaded archive against BOTH this file and the upstream SHA256SUMS.
-# When bumping PINNED_RESTIC or PINNED_RCLONE in config.env.example, update the lines below from:
+# When bumping PINNED_RESTIC or PINNED_RCLONE in config.env.example, add new lines; keep old ones while configs may still pin them:
 #   https://github.com/restic/restic/releases/download/v<PINNED_RESTIC>/SHA256SUMS
 #   https://downloads.rclone.org/v<PINNED_RCLONE>/SHA256SUMS
 f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c  restic_0.19.1_linux_amd64.bz2
