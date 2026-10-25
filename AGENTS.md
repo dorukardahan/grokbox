@@ -35,7 +35,7 @@ quick snapshots every 15 min kept 24 h, `TZ=UTC`, Drive folder `GrokBox/restic`.
 ```bash
 ./install.sh
 ```
-Downloads pinned `restic` and `rclone` into `bin/`, verifies SHA256 against the upstream SHA256SUMS,
+Downloads pinned `restic` and `rclone` into `bin/`, verifies SHA256 against `checksums.txt` and the upstream SHA256SUMS,
 needs no root, supports linux amd64 and arm64.
 
 ### 3. [HUMAN] The restic password (the key to every backup)
@@ -145,5 +145,6 @@ Mention what still cannot be backed up (README "Limits": bots' private memory ot
 | restore only what is missing | `./restore.sh <id> --missing-only [path...]` (asks first; `--yes` only after the human agreed) |
 | pause / resume backups | `touch state/PAUSE` / `rm state/PAUSE` |
 | after a box move | `./install.sh --schedule`, then `./status.sh`; see `REBUILD.md` |
+| repair / undo prune / wrong host | see `docs/runbooks.md` (never prune while `check` fails; ask human before rewriting/dropping snapshots) |
 
-If something fails, read `REBUILD.md`, `README.md`, and `logs/backup-YYYY-MM.log` (never the secrets).
+If something fails, read `REBUILD.md`, `docs/runbooks.md`, `README.md`, and `logs/backup-YYYY-MM.log` (never the secrets).

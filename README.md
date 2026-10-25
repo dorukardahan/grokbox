@@ -145,6 +145,17 @@ You must also keep **outside the box**: the restic password, the Google OAuth cl
 stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), status no-success flag, test restore, check, status, scheduler start/stop,
 restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked SQLite dedupe, and the server-export failure cases.
 
+## Runbooks
+See [docs/runbooks.md](docs/runbooks.md) for step-by-step procedures:
+- **Repository repair** (`restic check` failed: `repair index`, `repair packs`, `repair snapshots`, never prune during repair)
+- **Undo a bad prune from the Drive trash** (`PRUNE_USE_TRASH=1`: `rclone backend untrash` or Drive web UI, then `repair index` and `check`)
+- **Wrong host** (`BACKUP_HOST` mismatch: `restore.sh --any-host` / `--host`, `restic rewrite --new-host` and tag handling)
+
+For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.md](REBUILD.md).
+
+## CI
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `shellcheck` on all shell scripts and executes `tests/smoke.sh` plus any additional `tests/*.sh` suites on every push and pull request. `install.sh` verifies downloaded `restic` and `rclone` archives against both the repo-pinned [checksums.txt](checksums.txt) and upstream `SHA256SUMS`.
+
 ## Files
 | file | what |
 |---|---|
