@@ -129,6 +129,7 @@ build_excludes() {
     echo "$RESTIC_PASSWORD_FILE"            # the repository key is NEVER uploaded
     echo "${GB_SECRETS%/}/restic-pass"
     echo "restic-pass"                      # any file with this name, anywhere
+    echo "${RCLONE_CONFIG}.auth.*"             # abandoned private consent workdirs (e.g. after SIGKILL)
     echo "${GB_STATE%/}/auth-*"; echo "${GB_LOGS%/}/auth-*.out"   # one-time OAuth URL/output
     echo "${GB_BIN%/}"; echo "${GB_CACHE%/}"; echo "$RESTIC_CACHE_DIR"
     echo "${GB_STATE%/}/*.lock"; echo "${GB_STATE%/}/excludes.combined"; echo "${GB_STATE%/}/excludes.*.tmp"
@@ -176,11 +177,54 @@ sched_pid() {  # pid of the running scheduler loop (empty if none)
 # Who holds backup.lock since when (for the "lock held too long" alert). Written right after flock.
 took_lock() { echo "$(date +%s) $$ $(basename "$0") $*" > "$GB_STATE/lock-holder"; }
 lock_busy() { ! ( exec 7>>"$GB_STATE/backup.lock"; flock -n 7 ); }
-lock_age_h() {  # hours the current holder has held backup.lock (empty if free or holder unknown)
+lock_record() {
+  local rest
+  LOCK_TIME=""; LOCK_PID=""; LOCK_JOB=""
+  read -r LOCK_TIME LOCK_PID LOCK_JOB rest < "$GB_STATE/lock-holder" 2>/dev/null || return 1
+  [[ "$LOCK_TIME" =~ ^[0-9]{1,10}$ && "$LOCK_PID" =~ ^[0-9]+$ ]] || return 1
+  LOCK_TIME=$((10#$LOCK_TIME))
+  (( LOCK_TIME <= $(date +%s) ))
+}
+lock_holder_alive() { python3 "$GB_DIR/lock-control.py" holds "$GB_STATE/backup.lock" "$LOCK_PID"; }
+lock_age_h() {  # retain the timestamp even when an inherited fd outlives the recorded parent
+  lock_busy && lock_record || return 0
+  echo $(( ( $(date +%s) - LOCK_TIME ) / 3600 ))
+}
+lock_budget_s() {
+  local duration="$RESTIC_TIMEOUT_BACKUP" factor=1
+  # check can run unlock, two forget calls, check, prune and test restore in sequence.
+  [[ "$LOCK_JOB" == check.sh ]] && { duration="$RESTIC_TIMEOUT_CHECK"; factor=3; }
+  python3 - "$duration" "$factor" "$LOCK_ALERT_HOURS" <<'PYLOCK'
+import re,sys
+m=re.fullmatch(r"([0-9]+(?:\.[0-9]+)?)([smhd]?)",sys.argv[1])
+n=float(m[1])*{'':1,'s':1,'m':60,'h':3600,'d':86400}[m[2]] if m else 0
+print(int(max(float(sys.argv[3])*3600, n*int(sys.argv[2])+3600)))
+PYLOCK
+}
+lock_problem() {
   lock_busy || return 0
-  local t p rest; read -r t p rest < "$GB_STATE/lock-holder" 2>/dev/null || return 0
-  [[ -n "$p" && -d "/proc/$p" ]] || return 0
-  echo $(( ( $(date +%s) - t ) / 3600 ))
+  local valid=0 age
+  lock_record && lock_holder_alive && valid=1
+  if [[ $valid == 0 ]]; then
+    sleep 2  # flock acquired -> record written is not atomic
+    lock_busy || return 0
+    if ! lock_record || ! lock_holder_alive; then
+      age=$(lock_age_h)
+      echo "backup.lock held${age:+ for ${age}h}; orphaned/unverifiable record; leftover processes: $(python3 "$GB_DIR/lock-control.py" holders "$GB_STATE/backup.lock" | paste -sd ','); inspect before an explicit --restart-scheduler --force"
+      return 0
+    fi
+  fi
+  if (( $(date +%s) - LOCK_TIME >= $(lock_budget_s) )); then
+    echo "backup.lock held for $(lock_age_h)h by: $LOCK_PID $LOCK_JOB (past job timeout plus grace)"
+  fi
+}
+heartbeat_job_active() {
+  # Only the scheduler's own verified child can explain a stale heartbeat.
+  local scheduler parent
+  lock_busy && lock_record && lock_holder_alive || return 1
+  scheduler=$(sched_pid); [[ -n "$scheduler" ]] || return 1
+  parent=$(ps -o ppid= -p "$LOCK_PID" | tr -d ' ')
+  [[ "$parent" == "$scheduler" ]] && (( LOCK_TIME >= ${1:-0} && $(date +%s) - LOCK_TIME < $(lock_budget_s) ))
 }
 # First start of install/scheduler on this box: reference for the "no successful backup yet" alerts.
 mark_first_start() { [[ -s "$GB_STATE/first-start" ]] || date +%s > "$GB_STATE/first-start"; }
@@ -192,3 +236,30 @@ GUARD_LATCH="$GB_STATE/GUARD_TRIPPED"
 # successful hourly backup (live DB files may have been backed up mid-write meanwhile).
 # shellcheck disable=SC2034
 SQLITE_LATCH="$GB_STATE/SQLITE_FAILED"
+
+# Older releases left auto/quick on incomplete snapshots. Remove those retention tags first.
+prepare_retention() {
+  local ids id
+  ids=$(R snapshots --host "$BACKUP_HOST" --tag incomplete --json | python3 -c 'import json,sys;print("\n".join(s["id"] for s in json.load(sys.stdin) if set(s.get("tags") or []) & {"auto","quick"}))') || return 1
+  while IFS= read -r id; do
+    [[ -z "$id" ]] || R tag --remove auto,quick "$id" >>"$LOG" 2>&1 || return 1
+  done <<< "$ids"
+}
+
+backup_result_status() {
+  python3 - "$GB_STATE/last-backup.result" <<'PYRESULT'
+import re,sys
+try:
+    lines=open(sys.argv[1]).read().splitlines()
+    d=dict(line.split('=',1) for line in lines)
+    assert len(d)==len(lines)
+    assert d['result'] in ('complete','incomplete','failed','timeout')
+    for key in ('time','files','bytes','added','duration_s','unreadable'):
+        assert re.fullmatch(r'[0-9]+',d[key])
+    assert re.fullmatch(r'[0-9a-f]{0,64}',d['snapshot'])
+    assert d['result']!='complete' or d['snapshot']
+    print(d['result'])
+except (OSError, ValueError, KeyError, AssertionError):
+    print('unknown')
+PYRESULT
+}

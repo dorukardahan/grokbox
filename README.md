@@ -77,10 +77,10 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
 - **Consistent SQLite copies** of live databases (SQLite online-backup API) into `staging/sqlite/`, since copying live `.db` files is unsafe.
 - **Brain export**: indexes agent data directories and mirrors mounted agent stores (outside the roots) into `staging/brain/` with an `INDEX.md`.
 - **Time limits**: every restic call runs under `timeout -k` (`RESTIC_TIMEOUT` 3 h, `RESTIC_TIMEOUT_BACKUP` 12 h, `RESTIC_TIMEOUT_CHECK` 8 h),
-  so a hung Drive call cannot hold `state/backup.lock` forever; a killed run exits 124/137 and raises an alert. `state/lock-holder` records
-  who holds the lock since when; `status.sh` and the watchdog flag a lock held longer than `LOCK_ALERT_HOURS` (13 h).
+  a timed-out run exits 124/137 and raises an alert; orphaned children are reported for explicit recovery. `state/lock-holder` records
+  who holds the lock since when; alerts use job-specific timeout budgets (including sequential check work).
 - **Dead-man file**: the scheduler loop writes `state/scheduler.heartbeat` every minute; `status.sh` flags a loop that stopped
-  ticking (`HEARTBEAT_MAX_MIN`, 90 min) while no job holds the lock.
+  ticking (`HEARTBEAT_MAX_MIN`, 90 min), except during its own verified live job within the job timeout budget. Unrelated or orphaned locks do not hide a stale heartbeat.
 - **Drive trash for forget/prune** (`PRUNE_USE_TRASH=1`): repository files deleted by forget/prune go to the Drive trash
   (recoverable ~30 days; they count against the quota until Google empties the trash). Ordinary backups skip the trash.
   On by default; set `PRUNE_USE_TRASH=0` in `config.env` to delete at once instead.
@@ -192,3 +192,5 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 
 ## License
 MIT, see [LICENSE](LICENSE). Privacy: [PRIVACY.md](PRIVACY.md).
+
+See [lock, interrupted-backup and consent recovery](docs/lock-and-prune-safety.md) for emergency restart and prune safeguards.

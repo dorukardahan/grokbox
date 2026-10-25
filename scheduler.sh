@@ -66,9 +66,8 @@ while true; do
       if ! lock_busy; then
         alert "no successful HOURLY snapshot for ${age_h}h ($what); check $LOG"
       else
-        la=$(lock_age_h)
-        if [[ -n "$la" ]] && (( la >= LOCK_ALERT_HOURS )); then
-          alert "no successful HOURLY snapshot for ${age_h}h and backup.lock is held for ${la}h by: $(cut -d' ' -f2- "$GB_STATE/lock-holder" 2>/dev/null)"
+        problem=$(lock_problem)
+        if [[ -n "$problem" ]]; then alert "$problem"
         else log "watchdog: last hourly success ${age_h}h ago but a backup is running now"; fi
       fi
     fi
