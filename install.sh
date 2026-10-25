@@ -28,12 +28,20 @@ if [[ $STOP == 1 ]]; then
   exit 0
 fi
 
-# 1) pinned static binaries (re-download + verify against upstream SHA256SUMS if missing/corrupt)
+# 1) pinned static binaries (re-download + verify against checksums.txt + upstream SHA256SUMS if missing/corrupt)
 case "$(uname -m)" in
   x86_64|amd64) ARCH=amd64;; aarch64|arm64) ARCH=arm64;;
   *) echo "unsupported architecture $(uname -m) (need x86_64 or aarch64)"; exit 1;;
 esac
 dl() { if command -v curl >/dev/null 2>&1; then curl -fsSL -o "$2" "$1"; else wget -q -O "$2" "$1"; fi; }
+rb="restic_${PINNED_RESTIC}_linux_${ARCH}.bz2"; rz="rclone-v${PINNED_RCLONE}-linux-${ARCH}.zip"
+SUMS_FILE="${GB_CHECKSUMS:-$GB_DIR/checksums.txt}"
+for f in "$rb" "$rz"; do
+  if ! grep -qE "^[0-9a-f]{64}  $f\$" "$SUMS_FILE" 2>/dev/null; then
+    echo "ERROR: no pinned SHA256 for $f in $SUMS_FILE (when bumping PINNED_RESTIC/PINNED_RCLONE, update checksums.txt from the official upstream SHA256SUMS)" >&2
+    exit 1
+  fi
+done
 # bin/VERSIONS: arch + pinned versions (3 header lines) followed by the upstream archive checksums.
 # Any difference in arch/versions, or a binary failing SHA256SUMS.local, triggers a reinstall.
 WANT_HDR=$(printf 'arch=%s\nrestic=%s\nrclone=%s' "$ARCH" "$PINNED_RESTIC" "$PINNED_RCLONE")
@@ -41,14 +49,15 @@ if ! (cd "$GB_BIN" 2>/dev/null && [[ -x restic && -x rclone ]] && [[ "$(head -3 
       && sha256sum -c --quiet SHA256SUMS.local 2>/dev/null); then
   log "binaries missing, corrupt or different from the pinned versions/arch -> downloading pinned restic $PINNED_RESTIC / rclone $PINNED_RCLONE ($ARCH)"
   tmp=$(mktemp -d); mkdir -p "$GB_BIN"
-  rb="restic_${PINNED_RESTIC}_linux_${ARCH}.bz2"; rz="rclone-v${PINNED_RCLONE}-linux-${ARCH}.zip"
   (
-    cd "$tmp"
+    cd "$tmp" || exit 1
     dl "https://github.com/restic/restic/releases/download/v$PINNED_RESTIC/$rb" "$rb"
     dl "https://github.com/restic/restic/releases/download/v$PINNED_RESTIC/SHA256SUMS" rs.sums
+    grep -E "^[0-9a-f]{64}  $rb\$" "$SUMS_FILE" | sha256sum -c -
     grep " $rb\$" rs.sums | sha256sum -c -
     dl "https://downloads.rclone.org/v$PINNED_RCLONE/$rz" "$rz"
     dl "https://downloads.rclone.org/v$PINNED_RCLONE/SHA256SUMS" rc.sums
+    grep -E "^[0-9a-f]{64}  $rz\$" "$SUMS_FILE" | sha256sum -c -
     grep " $rz\$" rc.sums | sha256sum -c -
     python3 -c "import bz2,shutil,sys;shutil.copyfileobj(bz2.open(sys.argv[1]),open('restic','wb'))" "$rb"
     python3 -c "import zipfile,sys;zipfile.ZipFile(sys.argv[1]).extract(sys.argv[2],'.')" "$rz" "rclone-v$PINNED_RCLONE-linux-$ARCH/rclone"
