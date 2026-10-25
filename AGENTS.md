@@ -28,7 +28,8 @@ cd /workspace/grokbox
 cp config.env.example config.env     # optional edits: TZ, GB_FOLDER, BACKUP_ROOTS, retention, ...
 ```
 Ask the user only if they want non-defaults (time zone for logs, which folders, `BACKUP_PROFILE=lean` for a
-small 15 GB Drive). Defaults: roots `/workspace /home/box`, hourly 24 / daily 30 / weekly 12 / monthly 12,
+small 15 GB Drive, `PRUNE_USE_TRASH=0` to delete at once instead of the Drive trash on forget/prune).
+Defaults: roots `/workspace /home/box`, hourly 24 / daily 30 / weekly 12 / monthly 12,
 quick snapshots every 15 min kept 24 h, `TZ=UTC`, Drive folder `GrokBox/restic`.
 
 ### 2. Install the binaries

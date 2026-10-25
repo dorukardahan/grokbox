@@ -83,6 +83,9 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
 - **Drive trash for forget/prune** (`PRUNE_USE_TRASH=1`): repository files deleted by forget/prune go to the Drive trash
   (recoverable ~30 days; they count against the quota until Google empties the trash). Ordinary backups skip the trash.
   On by default; set `PRUNE_USE_TRASH=0` in `config.env` to delete at once instead.
+- **Capacity watch**: the nightly `check.sh` records local-disk and Drive-quota usage in `state/quota.status` and alerts
+  at `QUOTA_ALERT_PCT` (90%) full ([docs/capacity-and-logs.md](docs/capacity-and-logs.md)). Logs are kept forever by
+  default; set `LOG_RETENTION_DAYS` to delete old `logs/backup-*.log` files.
 - **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. No e-mail is sent:
   the box cannot send messages on its own. Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
@@ -112,6 +115,8 @@ cd /workspace/grokbox
 ./restore.sh --any-host list               # config.env lost / host renamed: all hosts (also --host NAME)
 ```
 If `BACKUP_HOST` has no snapshots at all, `restore.sh` stops with an error that lists the hosts that do.
+A real restore takes `state/backup.lock` (waits up to `RESTORE_LOCK_WAIT`); `list`/`ls` are read-only and skip it.
+`restore.sh --help` documents all exit codes.
 **Disaster on a fresh box**: see [REBUILD.md](REBUILD.md): clone, restore the password (`RESTIC_BACKUP_PASSWORD`) and the OAuth client JSON,
 `./auth-gdrive.sh`, `./restore.sh latest`, move folders back.
 
@@ -154,7 +159,8 @@ restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked 
 | `install.sh` | idempotent setup; `--init`, `--schedule`, `--restart-scheduler`, `--stop-scheduler`, `--gen-password`, `--show-password` |
 | `auth-gdrive.sh` | Google Drive login for rclone (own OAuth client, or `--rclone-default-client`) |
 | `backup.sh` | hourly (`auto`) or `--quick`; guards, SQLite copies, brain export, forget; `--dry-run`, `--force "why"` |
-| `check.sh` | daily forget + prune + check; monthly test restore |
+| `check.sh` | daily forget + prune + check; monthly test restore; starts the capacity watch + log retention |
+| `quota-check.sh` / `log-retention.sh` | nightly housekeeping called by `check.sh` ([docs/capacity-and-logs.md](docs/capacity-and-logs.md)) |
 | `test-restore.sh` | real restore of a sample + checksum verification, then deleted |
 | `restore.sh` | `list`, `ls`, restore into a restore dir, `--missing-only` |
 | `status.sh` | alerts, last runs, scheduler, snapshots; `--local`, `--ack` |

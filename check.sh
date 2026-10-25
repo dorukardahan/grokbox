@@ -2,6 +2,8 @@
 # Daily: forget per retention policy (hourly `auto` chain + `quick` chain separately), prune, verify
 # repo structure + a random subset of data. Monthly (day 1) or --test-restore: real test restore.
 source "$(dirname "$0")/lib.sh"; need_creds
+"$GB_DIR/log-retention.sh" || true   # optional LOG_RETENTION_DAYS cleanup (default: logs kept forever)
+"$GB_DIR/quota-check.sh"   || true   # disk + Drive usage -> state/quota.status, alert at QUOTA_ALERT_PCT
 exec 9>"$GB_STATE/backup.lock"
 flock -w "${LOCK_WAIT:-3600}" 9 || { log "check: backup lock busy; not run now (scheduler retries)"; exit 75; }
 took_lock check
