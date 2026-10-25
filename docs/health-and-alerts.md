@@ -105,6 +105,13 @@ is one alert until `status.sh --ack`. "No export yet" is shown without an alert 
 grace: once the first start (`state/first-start`) is older than `EXPECTED_BOTS_MAX_HOURS` and there is
 still no export at all, a nonempty roster raises one alert (the bots' routines create the export).
 
+Deleted bots may stay in `EXPECTED_BOTS`: ids in `DELETED_BOTS_FILE` (default
+`/home/box/agent-data/deleted-agents.json`) and names or ids in `RETIRED_BOTS=()` are exempt from
+missing/stale alerts. Retired names match case-insensitively or by slug. The status shows
+“deleted, history kept (N messages)” or “deleted before first export”; it does not remove history.
+Set `DELETED_BOTS_FILE=""` to disable the list. Missing or invalid lists are silently ignored.
+Only active bots count toward export checks; an entirely deleted roster is OK even before any export.
+
 ## 5. Drive report (`report.sh`, `latest-backup-report.txt`)
 After every hourly backup, daily check and test restore, `scheduler.sh` runs `report.sh`. It writes
 `state/latest-backup-report.txt`, a short plain-text report in `$TZ`: last backup time and result
