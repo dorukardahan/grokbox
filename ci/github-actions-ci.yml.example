@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck sqlite3 bzip2 unzip curl python3
+
+      - name: ShellCheck
+        run: |
+          shopt -s nullglob
+          shellcheck --severity=warning ./*.sh rebuild-kit/*.sh tests/*.sh
+
+      - name: Smoke test
+        run: bash tests/smoke.sh
+
+      - name: Extra test suites
+        run: |
+          shopt -s nullglob
+          for t in tests/*.sh; do
+            [[ "$t" == "tests/smoke.sh" ]] && continue
+            echo "=== Running $t ==="
+            bash "$t"
+          done
