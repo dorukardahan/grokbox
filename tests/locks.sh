@@ -20,6 +20,7 @@ cat > "$TMP/test.env" <<CFG
 GB_BIN="$TMP/bin"; GB_SECRETS="$TMP/fixture"; GB_STATE="$TMP/state"
 GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
+export AGENTS_DIR="$TMP/agents"
 export RESTIC_REPOSITORY="$TMP/local-repo"
 BACKUP_ROOTS=("$TMP/src"); QUICK_ROOTS=("$TMP/src")
 SQLITE_GLOBS=(); BRAIN_AGENT_DIRS=(); STORES_GLOB="$TMP/no-stores/*"

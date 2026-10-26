@@ -44,6 +44,7 @@ GB_BIN="$REPO_DIR/bin"
 GB_SECRETS="$SRC/gb-secrets"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
+export AGENTS_DIR="$TMP/agents"
 export RESTIC_REPOSITORY="$REPO"
 BACKUP_ROOTS=("$SRC"); QUICK_ROOTS=("\${BACKUP_ROOTS[@]}")
 RESTORE_BASE="$TMP/restore"

@@ -10,20 +10,21 @@
 #   expected-bots.sh --alert   same, and raise an alert (deduped: once per incident) when bots are missing, or
 #                              when there is still no export EXPECTED_BOTS_MAX_HOURS after the first start
 # Deleted ids (DELETED_BOTS_FILE) and RETIRED_BOTS names/ids are exempt; retained history is reported.
+# AGENTS_DIR profiles detect same-name replacements that have never been exported.
 # scheduler.sh runs it with --alert after every hourly backup; doctor.sh shows the line.
 source "$(dirname "$0")/lib.sh"; set +e; trap - ERR
 ALERT=0
-for a in "$@"; do case "$a" in --alert) ALERT=1;; -h|--help) sed -n 2,13p "$0"; exit 0;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
+for a in "$@"; do case "$a" in --alert) ALERT=1;; -h|--help) sed -n 2,14p "$0"; exit 0;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
 if (( ${#EXPECTED_BOTS[@]} == 0 )); then echo "no roster configured (EXPECTED_BOTS is empty)"; exit 0; fi
 POS="${SERVER_EXPORT_DIR:-$GB_DIR/staging/server-export}/state/positions.json"
 MAX_H="${EXPECTED_BOTS_MAX_HOURS:-26}"
 # prints 2 lines: the status line (with ages) and a stable alert summary (no ages/counts that grow by the hour)
-out=$(python3 - "$POS" "$MAX_H" "${EXPECTED_BOTS_GRACE_MIN:-60}" "$DELETED_BOTS_FILE" "${#RETIRED_BOTS[@]}" "${RETIRED_BOTS[@]}" "${EXPECTED_BOTS[@]}" <<'PY'
+out=$(python3 - "$POS" "$MAX_H" "${EXPECTED_BOTS_GRACE_MIN:-60}" "$DELETED_BOTS_FILE" "$AGENTS_DIR" "${#RETIRED_BOTS[@]}" "${RETIRED_BOTS[@]}" "${EXPECTED_BOTS[@]}" <<'PY'
 import json, os, re, sys, time, unicodedata
 from datetime import datetime
 pos_file, max_h, grace_min = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
-deleted_file, retired_n = sys.argv[4], int(sys.argv[5])
-retired, want = sys.argv[6:6 + retired_n], sys.argv[6 + retired_n:]
+deleted_file, agents_dir, retired_n = sys.argv[4], sys.argv[5], int(sys.argv[6])
+retired, want = sys.argv[7:7 + retired_n], sys.argv[7 + retired_n:]
 # Keep tolerant parsing identical to server-export-merge.py: deleted_ids().
 deleted_ids = set()
 try:
@@ -54,6 +55,38 @@ def matches(a, b):
 def is_deleted(e, tid, rec):
     names = [e, tid] + ([rec.get("name")] if rec else [])
     return tid in deleted_ids or any(matches(n, r) for n in names for r in retired)
+# An unavailable inventory is optional; invalid profiles still leave an id-only entry.
+inventory = {}
+try:
+    with os.scandir(agents_dir) as entries:
+        for entry in entries:
+            try:
+                if not entry.is_dir(): continue
+            except OSError: continue
+            name = None
+            try:
+                with open(os.path.join(entry.path, "profile.json"), encoding="utf-8") as f:
+                    profile = json.load(f)
+                if isinstance(profile, dict) and isinstance(profile.get("name"), str):
+                    name = profile["name"]
+            except (OSError, ValueError): pass
+            inventory[entry.name] = {"name": name}
+except OSError: inventory = {}
+def deleted_status(e, tid, rec):
+    total = as_int(rec.get("total"), 0) if rec else 0
+    M = as_int(rec.get("max_pos"), -1) if rec else -1
+    kept = max(0, M + 1)
+    if total > 0: kept = min(total, kept)
+    incomplete = M < total - 1 or bool(rec and rec.get("pending"))
+    status = (f"history kept ({kept} messages, no longer readable)" if kept and (not total or rec.get("unreadable")) else
+              "never exported" if not rec or not total else
+              f"nothing exported (0 of {total} messages)" if not kept else
+              f"history kept ({kept} of {total} messages, export incomplete)" if incomplete else
+              f"history kept ({kept} messages)")
+    name = (rec.get("name") or e) if rec else e
+    label = name if name.endswith(" (deleted)") else name + " (deleted)"
+    if e == tid and e != name: label += f" [{e[:8]}]"
+    return f"{label}: {status}"
 missing, stable, progress, deleted, newest = [], [], [], [], None
 active = 0
 for e in want:
@@ -61,21 +94,17 @@ for e in want:
                   ((e and tid == e) or matches(r.get("name"), e))]
     tid, rec = next(((tid, r) for tid, r in candidates if not is_deleted(e, tid, r)),
                     candidates[0] if candidates else (e, None))
+    if not candidates or is_deleted(e, tid, rec):
+        replacement = next(((i, profile) for i, profile in inventory.items()
+                            if (i == e or matches(profile.get("name"), e))
+                            and not is_deleted(e, i, profile)
+                            and not is_deleted(e, i, pos.get(i) if isinstance(pos.get(i), dict) else None)), None)
+        if replacement:
+            if is_deleted(e, tid, rec): deleted.append(deleted_status(e, tid, rec))
+            tid = replacement[0]
+            rec = pos.get(tid) if isinstance(pos.get(tid), dict) else None
     if is_deleted(e, tid, rec):
-        total = as_int(rec.get("total"), 0) if rec else 0
-        M = as_int(rec.get("max_pos"), -1) if rec else -1
-        kept = max(0, M + 1)
-        if total > 0: kept = min(total, kept)
-        incomplete = M < total - 1 or bool(rec and rec.get("pending"))
-        status = (f"history kept ({kept} messages, no longer readable)" if kept and (not total or rec.get("unreadable")) else
-                  "never exported" if not rec or not total else
-                  f"nothing exported (0 of {total} messages)" if not kept else
-                  f"history kept ({kept} of {total} messages, export incomplete)" if incomplete else
-                  f"history kept ({kept} messages)")
-        name = (rec.get("name") or e) if rec else e
-        label = name if name.endswith(" (deleted)") else name + " (deleted)"
-        if e == tid and e != name: label += f" [{e[:8]}]"
-        deleted.append(f"{label}: {status}"); continue
+        deleted.append(deleted_status(e, tid, rec)); continue
     active += 1
     if rec is None: missing.append(f"{e} (never exported)"); stable.append(f"{e} (never exported)"); continue
     if rec.get("unreadable"): missing.append(f"{e} (not readable)"); stable.append(f"{e} (not readable)"); continue

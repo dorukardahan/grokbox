@@ -68,6 +68,7 @@ GB_BIN="$REPO_DIR/bin"
 GB_SECRETS="$SEC"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
+export AGENTS_DIR="$TMP/agents"
 export RESTIC_REPOSITORY="$REPO"
 export SERVER_EXPORT_DIR="$SE"
 DELETED_BOTS_FILE="$TMP/deleted-agents.json"
@@ -110,8 +111,8 @@ nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$T
 
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
 run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
-old=$(mkcfg old 'unset ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS')
-run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json ]]' _ "$REPO_DIR"
+old=$(mkcfg old 'unset ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
 v=$(bash -c 'source "$1/lib.sh"; kv_write "$GB_STATE/kv.test" "result=ok" "time=42" "note=a=b"; kv_get "$GB_STATE/kv.test" note; kv_get "$GB_STATE/kv.test" missing; kv_get "$GB_STATE/nofile" x; echo end' _ "$REPO_DIR")
 check "kv_write/kv_get round trip; missing key/file give empty, never fail" test "$v" = "a=b
 end"
@@ -246,6 +247,62 @@ for retirement in deleted retired; do
   checkx "$retirement old id: first active same-name candidate is stale, exit 1 and alert" 'test "$rc" = 1 && test "$out" = "missing from the server-side export: Old Bot (last export check 40 h ago); present: 0 of 1" && test "$(nalerts "Old Bot (last export check older than 26 h)")" = 1'
   "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 done
+
+# Inventory detects a recreated bot before its first export; all fixtures stay local.
+echo '{"tid-old":{"name":"Helper Bot","total":5,"max_pos":4}}' > "$SE/state/positions.json"
+echo '{"agents":{"tid-old":{}}}' > "$TMP/deleted-agents.json"
+mkdir -p "$TMP/agents/tid-new"
+echo '{"name":"helper-bot"}' > "$TMP/agents/tid-new/profile.json"
+inv=$(mkcfg bots-inventory 'EXPECTED_BOTS=("Helper Bot")')
+rc=0; out=$(GB_CONFIG="$inv" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
+checkx "unexported same-name replacement: missing, retained predecessor history, stable alert" 'test "$rc" = 1 && test "$out" = "missing from the server-side export: Helper Bot (never exported); present: 0 of 1; deleted: Helper Bot (deleted): history kept (5 messages)" && test "$(nalerts "Helper Bot (never exported)")" = 1 && ! grep -q "deleted" "$TMP/state/ALERT"'
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+for kind in empty missing file garbled nonobject nonstring missing-profile deleted retired-id retired-name; do
+  cfg="$inv"
+  case "$kind" in
+    empty) mkdir -p "$TMP/empty-agents"; cfg=$(mkcfg bots-inventory-empty 'EXPECTED_BOTS=("Helper Bot")' "AGENTS_DIR=$TMP/empty-agents");;
+    missing) cfg=$(mkcfg bots-inventory-missing 'EXPECTED_BOTS=("Helper Bot")' "AGENTS_DIR=$TMP/no-agents");;
+    file) echo '{}' > "$TMP/agents-file"; cfg=$(mkcfg bots-inventory-file 'EXPECTED_BOTS=("Helper Bot")' "AGENTS_DIR=$TMP/agents-file");;
+    garbled) echo '{broken' > "$TMP/agents/tid-new/profile.json";;
+    nonobject) echo '[]' > "$TMP/agents/tid-new/profile.json";;
+    nonstring) echo '{"name":42}' > "$TMP/agents/tid-new/profile.json";;
+    missing-profile) rm "$TMP/agents/tid-new/profile.json";;
+    deleted) echo '{"name":"Helper Bot"}' > "$TMP/agents/tid-new/profile.json"; echo '{"agents":{"tid-old":{},"tid-new":{}}}' > "$TMP/deleted-agents.json";;
+    retired-id) echo '{"agents":{"tid-old":{}}}' > "$TMP/deleted-agents.json"; cfg=$(mkcfg bots-inventory-retired 'EXPECTED_BOTS=("Helper Bot")' 'RETIRED_BOTS=("tid-new")');;
+    retired-name) cfg=$(mkcfg bots-inventory-retired-name 'EXPECTED_BOTS=("Helper Bot")' 'RETIRED_BOTS=("helper-bot")');;
+  esac
+  rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh" --alert 2>"$TMP/inventory.err") || rc=$?
+  checkx "$kind inventory: predecessor stays exempt, no warnings or alert" 'test "$rc" = 0 && test "$out" = "no active expected bots; deleted: Helper Bot (deleted): history kept (5 messages)" && test ! -s "$TMP/inventory.err" && test "$(nalerts "expected bots")" = 0'
+done
+# A file named like an agent is not inventory; an id still matches without a valid profile.
+mkdir -p "$TMP/file-agents"
+echo '{}' > "$TMP/file-agents/Helper Bot"
+cfg=$(mkcfg bots-inventory-file-entry 'EXPECTED_BOTS=("Helper Bot")' "AGENTS_DIR=$TMP/file-agents")
+rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh") || rc=$?
+checkx "non-directory inventory entry is ignored" 'test "$rc" = 0 && [[ "$out" == "no active expected bots; deleted: Helper Bot (deleted): history kept (5 messages)" ]]'
+echo '{broken' > "$TMP/agents/tid-new/profile.json"
+cfg=$(mkcfg bots-inventory-id 'EXPECTED_BOTS=("tid-new")')
+rc=0; out=$(GB_CONFIG="$cfg" "$REPO_DIR/expected-bots.sh") || rc=$?
+checkx "id roster with garbled inventory profile remains never exported" 'test "$rc" = 1 && [[ "$out" == *"tid-new (never exported)"* ]]'
+echo '{"name":"Helper Bot"}' > "$TMP/agents/tid-new/profile.json"
+python3 - "$SE/state/positions.json" <<'PYFIX'
+import json, sys, time
+p = json.load(open(sys.argv[1]))
+p["tid-new"] = {"name": "Helper Bot", "total": 5, "max_pos": 4,
+                "checked": time.strftime('%Y-%m-%d %H:%M:%S%z')}
+json.dump(p, open(sys.argv[1], "w"))
+PYFIX
+rc=0; out=$(GB_CONFIG="$inv" "$REPO_DIR/expected-bots.sh" --alert) || rc=$?
+checkx "exported replacement is present and complete" 'test "$rc" = 0 && [[ "$out" == "all 1 expected bots present and complete"* ]] && test "$(nalerts "expected bots")" = 0'
+# Inventory-name resolution also uses an existing record whose stored name differs.
+python3 - "$SE/state/positions.json" <<'PYFIX'
+import json, sys
+p = json.load(open(sys.argv[1])); p["tid-new"]["name"] = "Renamed Bot"
+json.dump(p, open(sys.argv[1], "w"))
+PYFIX
+rc=0; out=$(GB_CONFIG="$inv" "$REPO_DIR/expected-bots.sh") || rc=$?
+checkx "inventory replacement uses its existing export record by id" 'test "$rc" = 0 && [[ "$out" == "all 1 expected bots present and complete"* && "$out" == *"; deleted: Helper Bot (deleted): history kept (5 messages)" ]]'
+rm -rf "$TMP/agents"
 
 # Empty slugs must not equate unrelated names, or retire nameless merger records.
 echo '{"tid-nameless":{"max_pos":0,"lines":1}}' > "$SE/state/positions.json"
@@ -479,6 +536,11 @@ echo '{"agents":{"tid-2":{}}}' > "$TMP/deleted-agents.json"
 dcd=$(mkcfg doc-deleted "GB_STATE=$D" 'EXPECTED_BOTS=("Old Bot")')
 rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "deleted bot with stale history: doctor expected bots OK, exit 0" all test "$rc" = 0 --and-- grep -q '^OK       expected bots: no active expected bots; deleted: Old Bot (deleted): history kept (5 messages)' "$TMP/doc.out"
+mkdir -p "$TMP/agents/tid-doctor-new"
+echo '{"name":"Old Bot"}' > "$TMP/agents/tid-doctor-new/profile.json"
+rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "unexported replacement: doctor warns, exit 1" all test "$rc" = 1 --and-- grep -q '^WARN *expected bots: missing from the server-side export: Old Bot (never exported).*; deleted: Old Bot (deleted): history kept (5 messages)' "$TMP/doc.out"
+rm -rf "$TMP/agents"
 printf 'drive_used=1\ndrive_total=2\ndrive_pct=50\ndisk_pct=85\ndisk_path=/tmp\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "disk 85%: WARN only -> exit 1" all test "$rc" = 1 --and-- grep -q '^WARN *quota/disk: Drive 50% used, local disk 85% used' "$TMP/doc.out" --and-- grep -q '^Overall: WARN' "$TMP/doc.out"

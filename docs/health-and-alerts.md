@@ -117,6 +117,10 @@ The suffix is added only once, including for `RETIRED_BOTS`.
 An id roster entry differing from the display name adds its first eight characters in brackets,
 for example “Helper Bot (deleted) [tid-2]: never exported”. History is never removed.
 Set `DELETED_BOTS_FILE=""` to disable the list. Missing or invalid lists are silently ignored.
+When only deleted/retired export records match, or none, `AGENTS_DIR` (default `/home/box/agent-data/agents`)
+is checked for active replacements using directory ids and `profile.json` names. An unexported
+replacement is missing (“never exported”); the deleted predecessor’s history remains in the suffix.
+Missing/unreadable inventories and missing/invalid profiles are silently tolerated.
 Only active bots count toward export checks; an entirely deleted roster is OK even before any export.
 
 ## 5. Drive report (`report.sh`, `latest-backup-report.txt`)
