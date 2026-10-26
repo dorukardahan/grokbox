@@ -105,6 +105,24 @@ is one alert until `status.sh --ack`. "No export yet" is shown without an alert 
 grace: once the first start (`state/first-start`) is older than `EXPECTED_BOTS_MAX_HOURS` and there is
 still no export at all, a nonempty roster raises one alert (the bots' routines create the export).
 
+Deleted bots may stay in `EXPECTED_BOTS`: ids in `DELETED_BOTS_FILE` (default
+`/home/box/agent-data/deleted-agents.json`) and names or ids in `RETIRED_BOTS=()` are exempt from
+missing/stale alerts. Retired names match case-insensitively or by slug. The status shows
+names as “Helper Bot (deleted): history kept (N messages)”, or
+“history kept (K of N messages, export incomplete)” for partial history. With a known total but
+no exported messages it shows “nothing exported (0 of N messages)”; absent records, or empty or
+unreadable records with nothing kept and no known positive total, show “never exported”. Previously
+exported history that is no longer readable shows “history kept (K messages, no longer readable)”.
+The suffix is added only once, including for `RETIRED_BOTS`.
+An id roster entry differing from the display name adds its first eight characters in brackets,
+for example “Helper Bot (deleted) [tid-2]: never exported”. History is never removed.
+Set `DELETED_BOTS_FILE=""` to disable the list. Missing or invalid lists are silently ignored.
+When only deleted/retired export records match, or none, `AGENTS_DIR` (default `/home/box/agent-data/agents`)
+is checked for active replacements using directory ids and `profile.json` names. An unexported
+replacement is missing (“never exported”); the deleted predecessor’s history remains in the suffix.
+Missing/unreadable inventories and missing/invalid profiles are silently tolerated.
+Only active bots count toward export checks; an entirely deleted roster is OK even before any export.
+
 ## 5. Drive report (`report.sh`, `latest-backup-report.txt`)
 After every hourly backup, daily check and test restore, `scheduler.sh` runs `report.sh`. It writes
 `state/latest-backup-report.txt`, a short plain-text report in `$TZ`: last backup time and result

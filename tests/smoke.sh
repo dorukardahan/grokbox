@@ -44,6 +44,7 @@ GB_BIN="$REPO_DIR/bin"
 GB_SECRETS="$SRC/gb-secrets"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
+export AGENTS_DIR="$TMP/agents"
 export RESTIC_REPOSITORY="$REPO"
 BACKUP_ROOTS=("$SRC"); QUICK_ROOTS=("\${BACKUP_ROOTS[@]}")
 RESTORE_BASE="$TMP/restore"
@@ -266,7 +267,7 @@ page() { local a=$1 b=$2 n=$3; shift 3; {
   printf 'Transcript of agent "Test Bot" (tid-1), positions %s\xe2\x80\x93%s of %s:\n\n' "$a" "$b" "$n"
   for m in "$@"; do printf '{"role":"user","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$m"; done
   [[ $a -gt 0 ]] && printf '\nOlder messages remain: call ReadTranscript again with the same in and before=%s.\n' "$a"; true; }; }
-sem() { SERVER_EXPORT_DIR="$SE" AGENTS_DIR="$TMP/se-agents" python3 "$REPO_DIR/server-export-merge.py" "$@"; }
+sem() { DELETED_BOTS_FILE="$TMP/deleted-agents.json" SERVER_EXPORT_DIR="$SE" AGENTS_DIR="$TMP/se-agents" python3 "$REPO_DIR/server-export-merge.py" "$@"; }
 texts() { python3 -c 'import sys,json;print(" ".join(json.loads(l)["message"]["content"][0]["text"] for l in open(sys.argv[1]) if l.strip()))' "$SE"/transcripts/tid-1__*.jsonl; }
 page 6 9 10 m6 m7 m8 m9 > "$FX/p2.txt"; page 0 2 10 m0 m1 m2 > "$FX/p0.txt"; page 3 5 10 m3 m4 m5 > "$FX/p1.txt"
 out=$(sem ingest "$FX/p2.txt" "$FX/p0.txt"); check "a gap is reported as the next before value" test "$out" = '{"tid-1": 6}'

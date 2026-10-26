@@ -62,7 +62,8 @@ A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
 
 PART B - server-side export of all bots (staging/server-export)
 B1. For every directory name <id> in <AGENTS_DIR> (skip files such as *.json), EXCEPT <MAIN_ID> (yourself;
-    GrokBox-Assist exports you), call ReadTranscript {in: <id>, limit: 200} (newest page). Run them in parallel.
+    GrokBox-Assist exports you) and ids in the deleted-bot list (DELETED_BOTS_FILE),
+    call ReadTranscript {in: <id>, limit: 200} (newest page). Run them in parallel.
 B2. Run: rc=0; python3 <REPO>/server-export-merge.py ingest --remove <the result files of this round> || rc=$?; echo "ingest_rc=$rc"
     Ingest a result that says "No conversation ... has the id" on its own, with --id <id>.
     ALWAYS judge the run by the printed ingest_rc line, never by the printed JSON. ingest_rc=0: the

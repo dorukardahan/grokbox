@@ -17,6 +17,11 @@ source "$GB_CONFIG"
 : "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
 [[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
 [[ -v EXPECTED_BOTS ]] || EXPECTED_BOTS=()
+: "${AGENTS_DIR=/home/box/agent-data/agents}"
+export AGENTS_DIR
+: "${DELETED_BOTS_FILE=/home/box/agent-data/deleted-agents.json}"
+export DELETED_BOTS_FILE
+[[ -v RETIRED_BOTS ]] || RETIRED_BOTS=()
 export TZ
 umask 077   # state, logs, staging and restored scratch data are private by default
 mkdir -p "$GB_STATE" "$GB_LOGS" "$GB_STAGING" "$RESTIC_CACHE_DIR"

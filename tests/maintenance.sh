@@ -36,6 +36,7 @@ GB_BIN="$BIN"
 GB_SECRETS="$TMP/secrets"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
+export AGENTS_DIR="$TMP/agents"
 export RESTIC_REPOSITORY="$REPO"
 export RESTIC_PASSWORD_FILE="$PASSF"
 BACKUP_ROOTS=("$SRC")
@@ -99,7 +100,7 @@ page() { local id=$1 a=$2 b=$3 n=$4; shift 4; {
   printf 'Transcript of agent "Test Bot" (%s), positions %s\xe2\x80\x93%s of %s:\n\n' "$id" "$a" "$b" "$n"
   for m in "$@"; do printf '{"role":"user","message":{"content":[{"type":"text","text":"%s"}]}}\n' "$m"; done
   [[ $a -gt 0 ]] && printf '\nOlder messages remain: call ReadTranscript again with the same in and before=%s.\n' "$a"; true; }; }
-sem() { SERVER_EXPORT_DIR="$SE" AGENTS_DIR="$TMP/se-agents" python3 "$REPO_DIR/server-export-merge.py" "$@"; }
+sem() { DELETED_BOTS_FILE="$TMP/deleted-agents.json" SERVER_EXPORT_DIR="$SE" AGENTS_DIR="$TMP/se-agents" python3 "$REPO_DIR/server-export-merge.py" "$@"; }
 texts() { python3 -c 'import sys,json,glob
 print(" ".join(json.loads(l)["message"]["content"][0]["text"]
               for f in sorted(glob.glob(sys.argv[1]+"/transcripts/"+sys.argv[2]+"__*.jsonl")) for l in open(f) if l.strip()))' "$SE" "$1"; }
@@ -167,6 +168,123 @@ check "overlapping page heals a half-written append (exit 0)" test "$(rc_of sem 
 check "...overlap fragment removed, no duplicates" test "$(texts bot-t4)" = "m0 m1 m2 m3 m4"
 check "...every overlap recovery line is valid JSON" python3 -c 'import json,sys;[json.loads(l) for l in open(sys.argv[1])]' "$(tfile bot-t4)"
 check "...overlap recovery leaves no .tmp files" test -z "$(find "$SE" -name '*.tmp')"
+
+# Independent deleted fixtures: exercise the CLI without any real agent data.
+run_ok "deleted merger: flags, labels, statuses, parsing, next, revival and unchanged transcript bytes" python3 - "$REPO_DIR/server-export-merge.py" "$TMP" <<'PYDELETED'
+import json, os, subprocess, sys
+from pathlib import Path
+script, tmp = sys.argv[1], Path(sys.argv[2])
+base = tmp / 'deleted-export'
+state = base / 'state'
+state.mkdir(parents=True)
+deleted = tmp / 'merger-deleted.json'
+env = dict(os.environ, SERVER_EXPORT_DIR=str(base), AGENTS_DIR=str(tmp / 'se-agents'),
+           DELETED_BOTS_FILE=str(deleted))
+def run(*args):
+    return subprocess.check_output([sys.executable, script, *args], env=env, text=True)
+def positions():
+    return json.loads((state / 'positions.json').read_text())
+def index():
+    # Ignore the generated timestamp when comparing content across minute boundaries.
+    return (base / 'INDEX.md').read_text().split('\n', 1)[-1]
+def row(tid):
+    return next(l for l in index().splitlines() if f'`{tid}`' in l)
+chunk = tmp / 'deleted-chunk.txt'
+chunk.write_text('Transcript of agent "Helper Bot" (bot-a), positions 0-1 of 2:\n'
+                 '{"text":"first"}\n{"text":"second"}\n')
+run('ingest', str(chunk))
+p = positions()
+p.update({'bot-active': dict(name='Helper Bot', total=5, max_pos=0),
+          'bot-gap': dict(name='Old Bot', total=5, max_pos=1, pending=[[4, 4]]),
+          'bot-none': dict(total=5, max_pos=-1),
+          'bot-empty': dict(name='Empty', total=0),
+          'bot-unreadable': dict(name='Hidden', total=5, max_pos=1, unreadable=True),
+          'bot-zero-kept': dict(total=0, max_pos=3, unreadable=True),
+          'bot-zero-readable': dict(total=0, max_pos=2),
+          'bot-capped': dict(total=2, max_pos=9, unreadable=True),
+          'bot-no-data': {},
+          'bot-hidden-empty': dict(total=0, unreadable=True),
+          'bot-suffix': dict(name='Old Bot (deleted)', total=0)})
+(state / 'positions.json').write_text(json.dumps(p, sort_keys=True))
+run('index')
+active_index = index()
+files = {f.name: f.read_bytes() for f in (base / 'transcripts').iterdir()}
+ids = [i for i in p if i != 'bot-active']
+# All accepted list shapes, including metadata and invalid list members.
+for payload in ({'agents': {i: {} for i in ids}}, {'agents': ids},
+                {'agents': [{'id': i} for i in ids]}, ids,
+                [{'id': i} for i in ids] + [None, 3, {'id': []}],
+                dict({i: {} for i in ids}, version=1)):
+    deleted.write_text(json.dumps(payload))
+    run('index')
+    assert all(positions()[i]['deleted'] is True for i in ids)
+    assert positions()['bot-a']['name'] == 'Helper Bot'
+    assert '| Helper Bot (deleted) |' in row('bot-a')
+    assert '| Helper Bot |' in row('bot-active')
+    assert 'deleted, history kept (complete)' in row('bot-a')
+    assert 'deleted, history kept (2 of 5 messages, export incomplete)' in row('bot-gap')
+    assert 'deleted, nothing exported (0 of 5 messages)' in row('bot-none')
+    for i, kept in [('bot-unreadable', 2), ('bot-zero-kept', 4),
+                    ('bot-zero-readable', 3), ('bot-capped', 2)]:
+        assert f'deleted, history kept ({kept} messages, no longer readable)' in row(i)
+    for i in ['bot-empty', 'bot-suffix', 'bot-no-data', 'bot-hidden-empty']:
+        assert 'deleted before first export' in row(i)
+    assert '| ? (deleted) |' in row('bot-none')
+    assert '(deleted) (deleted)' not in index()
+    before_pos, before_index = (state / 'positions.json').read_bytes(), index()
+    run('index')
+    assert (state / 'positions.json').read_bytes() == before_pos
+    assert index() == before_index
+    assert {f.name: f.read_bytes() for f in (base / 'transcripts').iterdir()} == files
+    assert json.loads(run('next')) == {'bot-active': 'newest'}
+# Repair refreshes and persists flags even when no split files need repair.
+before_index = index()
+p = positions()
+for r in p.values(): r.pop('deleted', None)
+(state / 'positions.json').write_text(json.dumps(p))
+run('repair')
+assert all(positions()[i]['deleted'] is True for i in ids)
+assert index() == before_index
+assert {f.name: f.read_bytes() for f in (base / 'transcripts').iterdir()} == files
+deleted.write_text('[]')
+run('repair')
+assert all('deleted' not in r for r in positions().values())
+assert index() == active_index
+deleted.write_text(json.dumps(ids))
+# Ingest refreshes all flags, including untouched ids, without renaming transcripts.
+p = positions()
+for r in p.values(): r.pop('deleted', None)
+(state / 'positions.json').write_text(json.dumps(p))
+run('ingest', str(chunk))
+assert all(positions()[i]['deleted'] is True for i in ids)
+assert positions()['bot-a']['name'] == 'Helper Bot'
+assert '| Helper Bot (deleted) |' in row('bot-a')
+assert {f.name: f.read_bytes() for f in (base / 'transcripts').iterdir()} == files
+# next consults the current list even before index refreshes stored flags.
+deleted.write_text('[]')
+assert 'bot-gap' in json.loads(run('next'))
+run('index')
+assert all('deleted' not in r for r in positions().values())
+assert index() == active_index
+for kind in ['missing', 'garbled', 'empty', 'directory', 'disabled']:
+    path = tmp / ('deleted-' + kind)
+    if kind == 'garbled': path.write_bytes(b'\xffinvalid JSON')
+    if kind == 'empty': path.touch()
+    if kind == 'directory': path.mkdir()
+    env['DELETED_BOTS_FILE'] = '' if kind == 'disabled' else str(path)
+    # A stale true flag must also be cleared on invalid input.
+    p = positions(); p['bot-a']['deleted'] = True
+    (state / 'positions.json').write_text(json.dumps(p))
+    run('index')
+    assert all('deleted' not in r for r in positions().values())
+    assert index() == active_index
+# Revival through ingest also clears flags.
+p = positions(); p['bot-a']['deleted'] = True
+(state / 'positions.json').write_text(json.dumps(p))
+run('ingest', str(chunk))
+assert 'deleted' not in positions()['bot-a']
+assert {f.name: f.read_bytes() for f in (base / 'transcripts').iterdir()} == files
+PYDELETED
 
 step "restore.sh --help, exit codes, private temp, backup.lock"
 rc=0; GB_CONFIG=/nonexistent/config "$REPO_DIR/restore.sh" --help >"$TMP/h.out" 2>&1 || rc=$?
