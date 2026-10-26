@@ -110,9 +110,9 @@ alert_in() { local c="$1"; shift; GB_CONFIG="$c" bash -c 'source "$1/lib.sh"; sh
 nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$TMP/state/ALERT" || true; }
 
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
-run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
-old=$(mkcfg old 'unset ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
-run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
+run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
+old=$(mkcfg old 'unset EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
 v=$(bash -c 'source "$1/lib.sh"; kv_write "$GB_STATE/kv.test" "result=ok" "time=42" "note=a=b"; kv_get "$GB_STATE/kv.test" note; kv_get "$GB_STATE/kv.test" missing; kv_get "$GB_STATE/nofile" x; echo end' _ "$REPO_DIR")
 check "kv_write/kv_get round trip; missing key/file give empty, never fail" test "$v" = "a=b
 end"
@@ -397,6 +397,89 @@ for roster in 'EXPECTED_BOTS=("tid-2")' 'EXPECTED_BOTS=("tid-2" "bot-a")'; do
 done
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 
+step "daily export check (export-freshness.sh)"
+# Dedicated positions fixture, leaving the roster fixture intact for later tests.
+EF="$TMP/daily-export"; mkdir -p "$EF/state"
+efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+efpos() {  # efpos AGE_A AGE_B [unreadable]: ages in hours
+  python3 - "$EF/state/positions.json" "$@" <<'PYFIX'
+import json, sys, time
+stamp = lambda h: time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(time.time() - float(h)*3600))
+json.dump({"bot-a": {"name": "MainBot", "checked": stamp(sys.argv[2])},
+           "bot-b": {"name": "Helper Bot", "checked": stamp(sys.argv[3]), "unreadable": len(sys.argv) > 4}},
+          open(sys.argv[1], "w"))
+PYFIX
+}
+efcheck() {  # efcheck EXPECTED_RC TEXT [flags]
+  local want="$1" needle="$2"; shift 2
+  rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/export-freshness.sh" "$@") || rc=$?
+  checkx "daily export: exit $want, $needle" 'test "$rc" = "$want" && [[ "$out" == *"$needle"* ]]'
+}
+efpos 2 40
+efcheck 0 'daily export OK (newest per-bot export check 2 h ago)'
+efpos 40 50
+efcheck 1 'daily export missed: no bot was exported in the last 26 h'
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+efcheck 1 'daily export missed' --alert
+efpos 41 51
+efcheck 1 'daily export missed' --alert
+check "daily export alert dedupes as ages grow and contains no fixture ids/names" all test "$(nalerts 'daily export missed')" = 1 --and-- not grep -Eq 'bot-a|bot-b|MainBot|Helper Bot|41|51' "$TMP/state/ALERT"
+for shape in '{"agents":{"bot-b":{}}}' '{"bot-b":{}}' '["bot-b"]' '[{"id":"bot-b"}]'; do
+  echo "$shape" > "$TMP/daily-deleted.json"
+  efc=$(mkcfg daily-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json")
+  efpos 40 0; efcheck 1 'daily export missed'
+done
+for retired in 'helper-bot' 'BOT-B'; do
+  efc=$(mkcfg daily-retired "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""' "RETIRED_BOTS=(\"$retired\")")
+  efcheck 1 'daily export missed'
+done
+efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+efpos 40 0 unreadable; efcheck 1 'daily export missed'
+# Embedded deletion survives a missing/unreadable external deletion list.
+efc=$(mkcfg daily-embedded-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/no-deleted-list")
+efpos 40 0
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: pos = json.load(f)
+pos["bot-b"]["deleted"] = True
+with open(p, "w") as f: json.dump(pos, f)
+PYFIX
+efcheck 1 'daily export missed'
+echo '{"bot-b":{"deleted":true}}' > "$EF/state/positions.json"
+efcheck 0 'daily export: no active exported bots'
+
+echo '["bot-a"]' > "$TMP/daily-deleted.json"
+efc=$(mkcfg daily-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json")
+efcheck 0 'daily export: no active exported bots'
+efc=$(mkcfg daily-off "export SERVER_EXPORT_DIR=$EF" 'EXPORT_MISSED_HOURS=0')
+efcheck 0 'daily export check disabled'
+efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+rm "$EF/state/positions.json"
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+now_s > "$TMP/state/first-start"
+efcheck 2 'no server-side export yet' --alert
+check "daily export: first-start grace suppresses alert" test "$(nalerts 'daily export missed')" = 0
+echo $(( $(now_s) - 27 * 3600 )) > "$TMP/state/first-start"
+efcheck 2 'no server-side export yet' --alert
+check "daily export: old first-start raises one alert" test "$(nalerts 'daily export missed')" = 1
+for empty in '' '{}'; do
+  printf '%s' "$empty" > "$EF/state/positions.json"
+  efcheck 2 'no server-side export yet'
+done
+printf 'garbled' > "$EF/state/positions.json"
+efcheck 1 'server export state unreadable (positions.json garbled)' --alert
+check "daily export: garbled state alerts" test "$(nalerts 'server export state unreadable')" = 1
+printf '[]' > "$EF/state/positions.json"
+efcheck 1 'server export state unreadable (positions.json garbled)'
+check "scheduler runs daily export immediately after expected bots with --alert and run wrapper" python3 -c 'import pathlib,sys;s=pathlib.Path(sys.argv[1]).read_text().splitlines();i=next(i for i,l in enumerate(s) if "run \"$GB_DIR/expected-bots.sh\" --alert" in l);assert s[i+1].strip()=="run \"$GB_DIR/export-freshness.sh\" --alert"' "$REPO_DIR/scheduler.sh"
+efc=$(mkcfg daily-badpy "export SERVER_EXPORT_DIR=$EF" "export PATH=$TMP/badpy:\$PATH")
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+efcheck 1 'daily export check failed' --alert
+check "daily export: Python failure alerts with correct cause" all test "$(nalerts 'daily export check failed')" = 1 --and-- test "$(nalerts 'daily export missed')" = 0
+rm -f "$TMP/state/first-start"
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+
 step "backup + weekly test restore (critical files, sha256 compare, result file, lock, failures)"
 rs init >/dev/null 2>&1
 run_ok "backup.sh (auto)" "$REPO_DIR/backup.sh"
@@ -531,7 +614,25 @@ now_s > "$D/scheduler.heartbeat"; now_s > "$D/last-success"; now_s > "$D/last-ch
 printf 'drive_pct=20\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "healthy state: exit 0, Overall: OK, no WARN/PROBLEM lines" all test "$rc" = 0 --and-- grep -q '^Overall: OK' "$TMP/doc.out" --and-- not grep -qE '^(WARN|PROBLEM)' "$TMP/doc.out"
-check "one line per topic" bash -c 'for t in alerts scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
+efpos 1 40
+defc=$(mkcfg doc-daily "GB_STATE=$D" "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor fresh daily export: exit 0 + OK row" all test "$rc" = 0 --and-- grep -q '^OK       daily export: daily export OK' "$TMP/daily-doc.out"
+efpos 40 50
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor stale daily export: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: daily export missed' "$TMP/daily-doc.out"
+rm -f "$EF/state/positions.json"
+now_s > "$D/first-start"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor no export during first-start grace: exit 0 + OK row" all test "$rc" = 0 --and-- grep -q '^OK       daily export: no server-side export yet (first-start grace)' "$TMP/daily-doc.out"
+echo $(( $(now_s) - 27 * 3600 )) > "$D/first-start"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor no export after first-start grace: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: no server-side export yet' "$TMP/daily-doc.out"
+rm -f "$D/first-start"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor no export without first-start marker: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: no server-side export yet' "$TMP/daily-doc.out"
+echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
+check "one line per topic" bash -c 'for t in alerts scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
 echo '{"agents":{"tid-2":{}}}' > "$TMP/deleted-agents.json"
 dcd=$(mkcfg doc-deleted "GB_STATE=$D" 'EXPECTED_BOTS=("Old Bot")')
 rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
@@ -631,7 +732,8 @@ check "garbled state files: no crash, still prints Overall and a sane exit code 
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" --json >"$TMP/doc.json" 2>&1 || rc=$?
 check "garbled state files: --json still valid JSON" python3 -c 'import json,sys;json.load(open(sys.argv[1]))' "$TMP/doc.json"
 rm -f "$D"/{last-backup.result,last-check.result,test-restore.result,quota.status,report-upload.status,lock-holder}
-GB_CONFIG="$old" "$REPO_DIR/doctor.sh" --json >"$TMP/doc.json" 2>&1 || true
+old_doc=$(mkcfg old-doc "source $old" "export AGENTS_DIR=$TMP/agents" "DELETED_BOTS_FILE=$TMP/deleted-agents.json")
+GB_CONFIG="$old_doc" "$REPO_DIR/doctor.sh" --json >"$TMP/doc.json" 2>&1 || true
 check "doctor.sh with an older config.env (no new settings) still produces valid JSON" python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d["overall"] in ("OK","WARN","PROBLEM")' "$TMP/doc.json"
 kill "$SP" 2>/dev/null || true; wait "$SP" 2>/dev/null || true
 

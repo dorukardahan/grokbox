@@ -4,7 +4,7 @@
 # server-export-merge.py). A listed bot counts as present only when it is there, readable, checked within
 # EXPECTED_BOTS_MAX_HOURS and its export is COMPLETE by the merger's own rule (max_pos >= total-1 and no pending
 # pages; an empty conversation, total 0, is complete). An incomplete export whose last check is younger than
-# EXPECTED_BOTS_GRACE_MIN counts as "export in progress" (the routine is still paging), not as missing.
+# EXPECTED_BOTS_GRACE_MIN counts as "export in progress" (the parent chat is still paging), not as missing.
 #   expected-bots.sh           print one line; exit 0 = all present / in progress (or no roster configured),
 #                              1 = some missing / not readable / stale / incomplete, 2 = no export yet
 #   expected-bots.sh --alert   same, and raise an alert (deduped: once per incident) when bots are missing, or
@@ -124,7 +124,7 @@ suffix = f"; deleted: {', '.join(deleted)}" if deleted else ""
 if not active:
     print(f"no active expected bots{suffix}\n-"); sys.exit(0)
 if no_export:
-    print(f"no server-side export yet ({active} expected bots unverified; the bots' routines write staging/server-export){suffix}\n{active}"); sys.exit(2)
+    print(f"no server-side export yet ({active} expected bots unverified; the bots' parent chats write staging/server-export){suffix}\n{active}"); sys.exit(2)
 if missing:
     print(f"missing from the server-side export: {', '.join(missing)}; present: {active - len(missing) - len(progress)} of {active}"
           + (f"; export in progress: {', '.join(progress)}" if progress else "") + suffix)
@@ -141,7 +141,7 @@ if (( rc == 2 )); then
   # bounded installation grace for active bots only
   first=$(epoch_file "$GB_STATE/first-start")
   if (( ALERT == 1 )) && { [[ -z "$first" ]] || (( $(date +%s) - first >= MAX_H * 3600 )); }; then
-    alert "expected bots: no server-side export at all (${out#*$'\n'} expected bots unverified, more than EXPECTED_BOTS_MAX_HOURS=$MAX_H h after the first start); check that the GrokBox-Main/Assist routines run (docs/bots.md)"
+    alert "expected bots: no server-side export at all (${out#*$'\n'} expected bots unverified, more than EXPECTED_BOTS_MAX_HOURS=$MAX_H h after the first start); check that the GrokBox-Main/Assist parent chats run the export loop (docs/bots.md)"
   fi
 fi
 exit "$rc"

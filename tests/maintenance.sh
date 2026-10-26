@@ -6,6 +6,7 @@
 # for the Drive quota, no network, no real secrets.
 #   tests/maintenance.sh              run (restic is reused from <repo>/bin)
 #   KEEP_TMP=1 tests/maintenance.sh   keep the temp directory for inspection
+# shellcheck disable=SC2016  # bash -c snippets expand later; fixture text stays literal
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-maint.XXXXXX")"

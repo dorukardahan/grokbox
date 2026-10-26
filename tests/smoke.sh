@@ -3,6 +3,7 @@
 # local restic repository. Never touches real /workspace or /home/box roots (or any other backup system).
 #   tests/smoke.sh            run (restic/rclone are reused from <repo>/bin or downloaded there)
 #   KEEP_TMP=1 tests/smoke.sh keep the temp directory for inspection
+# shellcheck disable=SC2016  # bash -c snippets expand later; fixture text stays literal
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-smoke.XXXXXX")"
@@ -301,7 +302,7 @@ check "age: an id never exported fails (missed run)" bash -c "! SERVER_EXPORT_DI
 tf=$(ls "$SE"/transcripts/tid-1__*.jsonl); head -n 9 "$tf" > "$SE/transcripts/tid-1__old-name.jsonl"; tail -n 7 "$tf" > "$tf.n"; mv "$tf.n" "$tf"
 touch -d '2 days ago' "$SE/transcripts/tid-1__old-name.jsonl"; chmod 600 "$SE"/transcripts/*
 sem repair >/dev/null
-check "repair merges a renamed bot's split history into one file" test "$(ls "$SE"/transcripts/tid-1__*.jsonl | wc -l)" = 1 -a "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12"
+check "repair merges a renamed bot's split history into one file" test "$(find "$SE/transcripts" -maxdepth 1 -name 'tid-1__*.jsonl' -printf x | wc -c)" = 1 -a "$(texts)" = "m0 m1 m2 m3 m4 m5 m6 m7 m8 m9 m10 m11 m12"
 check "repair keeps the originals in state/replaced/" test "$(find "$SE/state/replaced" -name 'tid-1__*' | wc -l)" = 2
 check "export dirs are 700, files 600" test -z "$(find "$SE" -type d ! -perm 700; find "$SE" -type f ! -perm 600)"
 sum2=$(sha256sum "$SE"/transcripts/tid-1__*.jsonl | cut -d' ' -f1); pos2=$(sha256sum "$SE/state/positions.json" | cut -d' ' -f1)

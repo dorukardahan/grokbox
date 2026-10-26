@@ -152,6 +152,21 @@ else row OK "drive report" "no upload yet (after the next hourly backup)"; fi
 eb=$("$GB_DIR/expected-bots.sh" 2>/dev/null); erc=$?
 case "$erc" in 0) row OK "expected bots" "$eb";; 1) row WARN "expected bots" "$eb";; *) row WARN "expected bots" "${eb:-check failed}";; esac
 
+# --- daily export (newest active per-bot check)
+ef=$("$GB_DIR/export-freshness.sh" 2>/dev/null); erc=$?
+ef=${ef%%$'\n'*}
+case "$erc" in
+  0) row OK "daily export" "$ef";;
+  2)
+    first=$(epoch_file "$GB_STATE/first-start")
+    if [[ -n "$first" ]] && (( $(date +%s) - first < EXPORT_MISSED_HOURS * 3600 )); then
+      row OK "daily export" "$ef (first-start grace)"
+    else
+      row WARN "daily export" "$ef"
+    fi;;
+  *) row WARN "daily export" "${ef:-check failed}";;
+esac
+
 # --- output
 overall=OK; code=0
 for s in "${S[@]}"; do [[ $s == PROBLEM ]] && { overall=PROBLEM; code=2; }; [[ $s == WARN && $code == 0 ]] && { overall=WARN; code=1; }; done

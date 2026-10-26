@@ -92,7 +92,7 @@ names in your local `config.env` only. The check reads `staging/server-export/st
 within `EXPECTED_BOTS_MAX_HOURS` (default 26, so a skipped daily routine is noticed) and its export is
 **complete** by the merger's own rule (`max_pos >= total - 1` and no pending pages; an empty conversation,
 `total` 0, is complete). A bot whose record was only touched (a recent `checked` with nothing exported, or
-pages still pending) is never "present". While the routine is still paging, such a gap is reported as
+pages still pending) is never "present". While the parent chat is still paging, such a gap is reported as
 *export in progress* for `EXPECTED_BOTS_GRACE_MIN` (default 60) minutes after the last check; after that it
 counts as missing. Names match case-insensitively and by slug (`GrokBox-Main` = `grokbox main`).
 ```bash
@@ -103,7 +103,7 @@ counts as missing. Names match case-insensitively and by slug (`GrokBox-Main` = 
 bots are missing). The alert text is stable per incident (reasons, no ages), so a bot that stays missing
 is one alert until `status.sh --ack`. "No export yet" is shown without an alert during the installation
 grace: once the first start (`state/first-start`) is older than `EXPECTED_BOTS_MAX_HOURS` and there is
-still no export at all, a nonempty roster raises one alert (the bots' routines create the export).
+still no export at all, a nonempty roster raises one alert (the bots' parent chats create the transcript export).
 
 Deleted bots may stay in `EXPECTED_BOTS`: ids in `DELETED_BOTS_FILE` (default
 `/home/box/agent-data/deleted-agents.json`) and names or ids in `RETIRED_BOTS=()` are exempt from
@@ -122,6 +122,14 @@ is checked for active replacements using directory ids and `profile.json` names.
 replacement is missing (“never exported”); the deleted predecessor’s history remains in the suffix.
 Missing/unreadable inventories and missing/invalid profiles are silently tolerated.
 Only active bots count toward export checks; an entirely deleted roster is OK even before any export.
+
+`export-freshness.sh` adds a separate **daily-export-missed** alert when no active per-bot check
+is newer than `EXPORT_MISSED_HOURS` (default 26; 0 disables). It ignores deleted/retired and
+unreadable bots. The scheduler runs it with `--alert` immediately after `expected-bots.sh`;
+`doctor.sh` shows a "daily export" row. Missing/empty state gets the same first-start grace,
+using this threshold; garbled state warns immediately. Alert text stays stable as ages grow.
+Both alerts can fire: freshness checks that any export happened, while the roster checks each bot.
+Scheduled routines cannot pull transcripts: run the parent chat loop in [routine-main.md](routine-main.md).
 
 ## 5. Drive report (`report.sh`, `latest-backup-report.txt`)
 After every hourly backup, daily check and test restore, `scheduler.sh` runs `report.sh`. It writes
@@ -147,7 +155,7 @@ turns the upload off.
 ## Files and state
 | file | what |
 |---|---|
-| `doctor.sh`, `report.sh`, `expected-bots.sh` | the three new scripts |
+| `doctor.sh`, `report.sh`, `expected-bots.sh`, `export-freshness.sh` | health checks and reporting |
 | `state/alert-seen`, `state/alert.lock` | alert dedupe: `key first-seen count` per incident (removed by `status.sh --ack`); the lock around it |
 | `state/report.lock` | serializes `report.sh` runs |
 | `logs/alert-hook.log` | output of `ALERT_HOOK` runs |

@@ -36,13 +36,15 @@ Background processes die when the box is moved, so the **GrokBox-Main** bot's da
 Some data lives only on the Grok Bot servers: every bot's conversation history and the bots' memory.
 Only a bot's own tools (`ReadTranscript`, `RecallMemory`) can read it, and a bot cannot export the
 conversation it is running in. So your bot creates **two dedicated bots** that do all the backup work and
-export each other ([docs/bots.md](docs/bots.md)). Your main bot keeps no backup routine.
+export each other ([docs/bots.md](docs/bots.md)). Scheduled runs check health and export memory,
+then always hand off to their normal chats: scheduled runs lack ReadTranscript and cannot talk to
+the owner. Parent chats pull transcript pages and report only problems. Your main bot keeps no backup routine.
 ```mermaid
 flowchart TB
   P[your primary bot] -->|setup: CreateAgent + SendToAgent| M & A
   M[GrokBox-Main<br/>daily, e.g. 05:15] -->|install.sh --schedule, status.sh, alerts| BOX[box backup<br/>scheduler + restic]
-  M -->|ReadTranscript: every bot except itself<br/>RecallMemory| X[staging/server-export/<br/>transcripts + memory + INDEX.md]
-  A[GrokBox-Assist<br/>daily, e.g. 09:00] -->|ReadTranscript: GrokBox-Main<br/>+ primary main chat| X
+  M -->|parent chat ReadTranscript: every bot except itself<br/>RecallMemory| X[staging/server-export/<br/>transcripts + memory + INDEX.md]
+  A[GrokBox-Assist<br/>daily, e.g. 09:00] -->|parent chat ReadTranscript: GrokBox-Main<br/>+ primary main chat| X
   A -.checks Main ran, covers a missed run.-> M
   M -.checks Assist ran.-> A
   X --> BOX
@@ -89,7 +91,7 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
 - **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. The same
   alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). No e-mail is sent by default: the box
   cannot send messages on its own; an optional `ALERT_HOOK` command (mail, webhook) can be configured ([docs/health-and-alerts.md](docs/health-and-alerts.md)).
-  Both bot routines read `status.sh --local` and `state/ALERT` every day and report every
+  Both bot routines read `status.sh --local` and `state/ALERT` every day; their parent chats report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
   scheduler is noticed within a day.
 - **Health check, weekly test restore, Drive report, expected bots** ([docs/health-and-alerts.md](docs/health-and-alerts.md)): `./doctor.sh`
@@ -150,8 +152,7 @@ You must also keep **outside the box**: the restic password, the Google OAuth cl
    Fallback: `./auth-gdrive.sh --rclone-default-client` (shared, rate-limited client; see [docs/migrate-client.md](docs/migrate-client.md)).
 4. `./install.sh --init`, `./backup.sh --dry-run`, `./backup.sh`, `./install.sh --schedule`, `./status.sh`.
 5. Your bot creates **GrokBox-Main** and **GrokBox-Assist** ([docs/bots.md](docs/bots.md)) and briefs them. Each creates its own daily
-   routine ([docs/routine-main.md](docs/routine-main.md): health + export of all bots; [docs/routine-assist.md](docs/routine-assist.md):
-   export Main + primary chat, watch Main) and runs the first full export. They report only problems.
+   routine for health, memory and mandatory handoff ([Main](docs/routine-main.md), [Assist](docs/routine-assist.md)) and runs the first full export in its normal chat. They report only problems.
 
 ## Test
 `tests/smoke.sh` runs the whole flow in a temp dir against a local restic repo (no Google Drive needed): install, init, backups, restore with checksum verification,
@@ -184,20 +185,21 @@ For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.
 | `status.sh` | alerts, last runs, scheduler, snapshots; `--local`, `--ack`, `--doctor` |
 | `doctor.sh` | one-screen health check: OK / WARN / PROBLEM per topic, exit 0/1/2; `--online`, `--json` |
 | `report.sh` | writes `latest-backup-report.txt` and uploads it next to the restic folder in Drive (`DRIVE_REPORT`) |
+| `export-freshness.sh` | checks whether any active bot was checked within `EXPORT_MISSED_HOURS` (26); `--alert` |
 | `expected-bots.sh` | checks the `EXPECTED_BOTS` roster against the latest server-side export; `--alert` |
 | `scheduler.sh` | cron replacement loop; re-execs itself on code/config change |
 | `lib.sh` | shared helpers (config loading, alerts, exclude building, guards) |
 | `manifest.py` | file count / bytes / newest mtime for the guard |
 | `sqlite-snapshot.py` | consistent copies of live SQLite databases |
 | `brain-export.py` | agent data/store discovery, mirror of stores outside the roots, `INDEX.md` |
-| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/`; `age` (did a routine run?), `repair` (renamed-bot split files) ([docs/server-export.md](docs/server-export.md)) |
+| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/`; `age` (did an export happen?), `repair` (renamed-bot split files) ([docs/server-export.md](docs/server-export.md)) |
 | `rebuild-kit/inventory.sh` | records installed tools and venv freezes into `state/rebuild-kit/` |
 | `excludes.txt`, `excludes-secrets.txt`, `excludes-lean.txt` | always / only if `BACKUP_SECRETS=0` / only if `BACKUP_PROFILE=lean` |
 | `docs/google-cloud-setup.md` | exact Google Cloud steps for the OAuth client |
 | `docs/bots.md` | the two backup bots: why, personas, setup briefs for `CreateAgent` / `SendToAgent` |
-| `docs/routine-main.md` | GrokBox-Main daily routine prompt (health + export of all bots), with placeholders |
-| `docs/routine-assist.md` | GrokBox-Assist daily routine prompt (export Main + primary chat, watch Main) |
-| `docs/server-export.md` | daily routine that pulls every bot's server-side conversation + memory into the backup |
+| `docs/routine-main.md` | GrokBox-Main scheduled health/memory prompt + parent chat export loop, with placeholders |
+| `docs/routine-assist.md` | GrokBox-Assist scheduled health/memory prompt + parent chat export of Main/primary, fallback |
+| `docs/server-export.md` | scheduled memory export + parent chat transcript export after handoff |
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |
 | `PRIVACY.md` | privacy policy (also used as the OAuth consent-screen policy URL) |
