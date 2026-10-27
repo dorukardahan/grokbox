@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Merge ReadTranscript (write_to_file) chunk files into staging/server-export/.
 
-ReadTranscript is a Grok Bot tool, not callable from cron, so a bot's daily routine (GrokBox-Main, and
-GrokBox-Assist for Main's own conversation) pulls the pages (in=<id>, limit=200, write_to_file=true, paging back with `before`) and runs:
+ReadTranscript is available in the bot's normal chat, not cron or scheduled runs. After its daily
+routine hands off, GrokBox-Main's chat (GrokBox-Assist for Main's conversation) pulls the pages (in=<id>, limit=200, write_to_file=true, paging back with `before`) and runs:
 
   server-export-merge.py ingest [--remove] CHUNK...   merge chunks (idempotent; re-ingest is a no-op).
                                                      A chunk that cannot be trusted (invalid JSON message
@@ -351,7 +351,7 @@ def write_index(pos):
     rows = sorted(pos.items(), key=lambda kv: (kv[1].get('name') or '').lower())
     with open(os.path.join(BASE, 'INDEX.md'), 'w', encoding='utf-8') as f:
         f.write(f"# Server-side transcript export — {time.strftime('%F %H:%M %z')}\n\n"
-                "Pulled with ReadTranscript by the GrokBox-Main daily routine (GrokBox-Assist exports Main's own conversation)\n"
+                "Pulled with ReadTranscript by GrokBox-Main's chat after its daily routine hands off (GrokBox-Assist exports Main's own conversation)\n"
                 "and merged by server-export-merge.py.\n\n"
                 "| bot / conversation | id | server messages | exported up to | lines | last export | status |\n|---|---|---|---|---|---|---|\n")
         for tid, r in rows:

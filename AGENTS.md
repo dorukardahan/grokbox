@@ -93,7 +93,9 @@ A box backup alone misses what lives only on the Grok Bot servers: every bot's f
 and the bots' memory. They can only be read with the Grok Bot tools `ReadTranscript` and `RecallMemory`.
 These are **bot tools**: no script, cron or `scheduler.sh` can call them, and you must never use cookies,
 scraped tokens or internal APIs instead. So all ongoing backup work is done by **two dedicated bots**, each
-with its own daily routine. **You (the primary bot) keep no backup routine.** Delete or disable any older
+with its own daily routine. Scheduled runs check health and export memory, but lack ReadTranscript
+and cannot talk to the owner. Every run explicitly hands transcript paging to its normal parent chat.
+**You (the primary bot) keep no backup routine.** Delete or disable any older
 Grok Box / watchdog routine of yours once both bots are running. Read [docs/bots.md](docs/bots.md) first.
 
 - **GrokBox-Main** does all backup work. Box side: `install.sh --schedule`, `status.sh`, alerts, Drive
@@ -113,8 +115,8 @@ Steps:
    filled in. Each bot then:
    - reads its template ([docs/routine-main.md](docs/routine-main.md) or [docs/routine-assist.md](docs/routine-assist.md));
    - **creates its own daily routine with its `UpdateRoutine` tool**;
-   - **runs the first full export right away**. Main exports all bots except itself; Assist exports Main
-     and your main chat.
+   - **runs the first full export right away in its normal chat, not in the scheduled routine**.
+     Main exports all bots except itself; Assist exports Main and your main chat.
    They reply with a short status. Do not paste conversation content anywhere.
 4. **Your own memory:** the two bots cannot read your private memory. Keep durable facts in the user's
    shared memory, and export your private memory once now. Run a few `RecallMemory` queries with
@@ -125,7 +127,7 @@ Steps:
    and Main, Assist and your own id must be present. Then run `./backup.sh` (or wait for the next hourly)
    so the export is in a snapshot.
 
-Both routines report to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale
+Both parent chats report to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale
 guard, export gaps, or a missed partner run. Details: [docs/server-export.md](docs/server-export.md).
 
 ### 9. Finish

@@ -41,6 +41,7 @@ while true; do
     echo "$hour" > "$GB_STATE/sched-backup"; echo "$now" > "$GB_STATE/sched-backup-at"
     run "$GB_DIR/backup.sh" --wait 1200
     run "$GB_DIR/report.sh"; run "$GB_DIR/expected-bots.sh" --alert   # Drive report + expected-bot roster (never block)
+    run "$GB_DIR/export-freshness.sh" --alert
     if [[ -f "$GB_STATE/last-success" && ! -f "$GB_STATE/last-test-restore" && ! -f "$GB_STATE/test-restore-attempted" ]]; then
       date +%s > "$GB_STATE/test-restore-attempted"; run "$GB_DIR/test-restore.sh"; run "$GB_DIR/report.sh"; fi
   elif (( QUICK_EVERY_MIN > 0 && now - $(get sched-quick-at) >= QUICK_EVERY_MIN * 60 - 30 \

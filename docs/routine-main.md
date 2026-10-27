@@ -1,13 +1,9 @@
 # GrokBox-Main daily routine (backup health + server export)
 
-GrokBox-Main owns this routine and creates it itself with `UpdateRoutine`. One run does two jobs:
-1. **Box side:** keeps the scheduler alive after a box move, reads `status.sh`, and surfaces alerts.
-2. **Server side:** exports every bot's conversation history (GrokBox-Assist included, but not Main
-   itself) and Main's own + the owner's shared memory into `staging/server-export/`. The hourly snapshot
-   picks it up.
-
-It reports only problems. Its partner routine is [routine-assist.md](routine-assist.md). Why two bots and
-why a bot routine at all: [bots.md](bots.md).
+GrokBox-Main creates its daily routine with `UpdateRoutine`. The scheduled run checks health and
+exports memory, then always hands transcript paging to its normal (parent) chat. Scheduled runs
+have RecallMemory but no ReadTranscript and cannot talk to the owner. The parent chat reports only
+problems. Partner: [routine-assist.md](routine-assist.md); setup: [bots.md](bots.md).
 
 ## Placeholders
 | placeholder | meaning | example |
@@ -18,20 +14,22 @@ why a bot routine at all: [bots.md](bots.md).
 | `<REMOTE>` | `GB_REMOTE:GB_FOLDER` from config.env | `gdrive:GrokBox/restic` |
 | `<LANGUAGE>` | language for reports | `English` |
 | `<MAIN_ID>` / `<ASSIST_ID>` / `<PRIMARY_ID>` | agent ids of GrokBox-Main, GrokBox-Assist, the primary bot | |
+| `<RESULT_DIR>` | directory for tool result files | `/workspace/agent-tools` |
 | `<HOUR>` | run time in the owner's time zone; keep it away from `check.sh` (04:40) | `05:15` |
 
 ## Routine settings
 - **Name:** `GrokBox-Main daily: backup health + server export`
 - **Schedule:** daily at `<HOUR>`. GrokBox-Assist runs a few hours later.
-- **Report:** only on problems, in `<LANGUAGE>`.
+- **Result:** always return the parent-chat handoff. Only the parent chat reports problems to the owner, in `<LANGUAGE>`.
 
-## Prompt
+## Scheduled run
+Store only this prompt in `UpdateRoutine`. Do not attempt B1–B3 here.
 ```text
 GrokBox-Main daily run. Box backups go to <REMOTE> (Google Drive of <DRIVE_ACCOUNT>), repo at <REPO>.
-Report to the owner ONLY if something below needs attention, in <LANGUAGE>; otherwise stay silent.
+Collect problems for the parent chat, in <LANGUAGE>. Always return the handoff below, even when healthy.
 Rules: never print secrets (secrets/*, restic password, tokens, auth URLs); never use backup.sh --force;
 never prune/forget/delete snapshots or Drive data; never print or summarize conversation content;
-always call ReadTranscript (and RecallMemory, when it offers it) with write_to_file: true; delete only result files you created;
+call RecallMemory with write_to_file: true when it offers it; delete only result files you created;
 never read the server any other way (no cookies, scraped tokens or internal APIs);
 do not change other bots' settings, routines or memory.
 
@@ -39,15 +37,14 @@ PART A - box backup health
 A1. Run: cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat state/ALERT 2>/dev/null
     Always run status.sh --local, even if install.sh --schedule failed.
 A2. Healthy = schedule_rc=0 AND the last status line is "Overall: OK" AND nothing is printed after
-    "--- open alerts:". If healthy, go to PART B. Every open alert line is reported to the owner (this
-    chat report is the alert channel: the box itself cannot send messages).
+    "--- open alerts:". If healthy, go to B4. Include every open alert line in the handoff; the parent chat reports it to the owner.
 A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
     - "rclone config missing", "Drive unreachable", invalid_grant / token expired / 401 errors: the Drive
-      authorisation is gone. Tell the owner it needs a new consent: run ./auth-gdrive.sh --reauth, open the printed
+      authorisation is gone. Tell the parent chat to notify the owner it needs a new consent: run ./auth-gdrive.sh --reauth, open the printed
       localhost URL in the box's own browser, and the owner signs in as <DRIVE_ACCOUNT> and clicks Allow.
       Do not try to fix tokens yourself.
-    - "stale-computer guard" (exit 4): do NOT force. Tell the owner; compare with ./restore.sh ls latest.
-    - "backup.lock held for Nh" or "Scheduler loop has not ticked": a job is hung. Tell the owner; the
+    - "stale-computer guard" (exit 4): do NOT force. Tell the parent chat to notify the owner; compare with ./restore.sh ls latest.
+    - "backup.lock held for Nh" or "Scheduler loop has not ticked": a job is hung. Tell the parent chat to notify the owner; the
       safe restart is ./install.sh --restart-scheduler (waits for the lock).
     Lock recovery: the timeout normally ends hung jobs automatically (TERM, then KILL after 60 seconds).
     Use ./install.sh --restart-scheduler --force only when the lock age exceeds
@@ -58,11 +55,42 @@ A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
     Auth re-consent exit 75 means the lock is busy: retry in a few minutes.
     - To test the Drive login without changing anything: ./auth-gdrive.sh --test
     - Any other alert: one line each, with the likely cause.
-    Only run ./status.sh --ack after the cause is fixed AND the owner has been told.
+    Leave alerts visible for the parent chat. ./doctor.sh is a one-screen check.
 
-PART B - server-side export of all bots (staging/server-export)
+PART B - memory, partner check and handoff (B1–B3 run in the parent chat)
+B4. Memory: call RecallMemory with about 10 generic queries ("user preferences", "projects", "bots and agents",
+    "routines", "accounts and services", "decisions", "people", "this week", the current month name), then:
+    python3 <REPO>/server-export-merge.py memory --remove --out grokbox-main-and-shared --label GrokBox-Main <files>
+    If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
+    VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
+    cat > <RESULT_DIR>/grokbox-main-mem-1.txt <<'GROKBOX_MEM_END_7Q2'
+    <the RecallMemory result, unchanged>
+    GROKBOX_MEM_END_7Q2
+    (numbered -1, -2, ...; the odd end marker cannot appear inside a result) and pass those files instead.
+    Never edit, summarize or add facts.
+B5. Partner check: python3 <REPO>/server-export-merge.py age --max-hours 26 <MAIN_ID>
+    Exit 1 means GrokBox-Assist has not exported you in 26 h: include in the handoff "GrokBox-Assist did
+    not export Main" (once the setup is older than a day).
+B6. Read <REPO>/staging/server-export/INDEX.md. Report rows with status "gap" or warnings. Do not report
+    "empty" / "not readable" rows, except a bot that was readable before and now is not.
+
+ALWAYS end with a result to the parent chat whose first line is exactly:
+EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop (B1–B3) now
+Then one line per health problem found (or "health: OK"), followed by any memory/partner/INDEX problems.
+No logs, no message content, no secrets. This handoff is required on every run, healthy or not.
+```
+
+## Parent chat: export loop
+On every handoff (or at any time), the normal chat runs the loop below. Keep the same safety rules
+as the scheduled prompt, use `write_to_file: true`, and report to the owner only on problems,
+including all problems in the handoff. Acknowledge alerts only after fixing the cause and telling
+the owner. Paging may go to a subagent only if it has ReadTranscript: an automation/scheduled
+subagent does not; a normal executor subagent started from the chat does.
+
+```text
 B1. For every directory name <id> in <AGENTS_DIR> (skip files such as *.json), EXCEPT <MAIN_ID> (yourself;
-    GrokBox-Assist exports you) and ids in the deleted-bot list (DELETED_BOTS_FILE),
+    GrokBox-Assist exports you) and ids in the deleted-bot list (DELETED_BOTS_FILE, default
+    /home/box/agent-data/deleted-agents.json),
     call ReadTranscript {in: <id>, limit: 200} (newest page). Run them in parallel.
 B2. Run: rc=0; python3 <REPO>/server-export-merge.py ingest --remove <the result files of this round> || rc=$?; echo "ingest_rc=$rc"
     Ingest a result that says "No conversation ... has the id" on its own, with --id <id>.
@@ -80,26 +108,12 @@ B3. For each "id": N call ReadTranscript {in: id, limit: 200, before: N}; for "i
     For a long backlog you may also request
     before = N-35, N-70, ... in parallel (overlaps are de-duplicated, gaps reappear). Stop after 30 rounds
     and report if not done.
-B4. Memory: call RecallMemory with about 10 generic queries ("user preferences", "projects", "bots and agents",
-    "routines", "accounts and services", "decisions", "people", "this week", the current month name), then:
-    python3 <REPO>/server-export-merge.py memory --remove --out grokbox-main-and-shared --label GrokBox-Main <files>
-    If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
-    VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
-    cat > /workspace/agent-tools/grokbox-main-mem-1.txt <<'GROKBOX_MEM_END_7Q2'
-    <the RecallMemory result, unchanged>
-    GROKBOX_MEM_END_7Q2
-    (numbered -1, -2, ...; the odd end marker cannot appear inside a result) and pass those files instead.
-    Never edit, summarize or add facts.
-B5. Partner check: python3 <REPO>/server-export-merge.py age --max-hours 26 <MAIN_ID>
-    Exit 1 means GrokBox-Assist has not exported you in 26 h: report "GrokBox-Assist did
-    not run" (once the setup is older than a day).
-B6. Read <REPO>/staging/server-export/INDEX.md. Report rows with status "gap" or warnings. Do not report
+B7. Read <REPO>/staging/server-export/INDEX.md. Report rows with status "gap" or warnings. Do not report
     "empty" / "not readable" rows, except a bot that was readable before and now is not.
-
-Report format, only when something needs attention: one short list, Part A first (each with the exact
-next step for the owner), then Part B. No logs, no message content, no secrets.
+Then run: cd <REPO> && ./export-freshness.sh
+It must print "daily export OK"; otherwise report the problem to the owner.
 ```
 
 ## First run
-Right after creating the routine, run its steps once. The first export pages back through every
-conversation, so it needs many rounds of B3. After that, each daily run only fetches what is new.
+After creating the scheduled routine, run health and memory steps once, and run B1–B3 in the chat
+right away. The first export may need many paging rounds; later exports fetch what is new.

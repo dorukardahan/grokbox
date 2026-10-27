@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline tests for GitHub Actions CI workflow, pinned archive checksums in install.sh,
 # operational runbooks (repair, untrash, wrong-host rewrite), and README/AGENTS documentation links.
+# shellcheck disable=SC2016
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-ci-install.XXXXXX")"
@@ -217,6 +218,11 @@ check "README.md links ci/github-actions-ci.yml.example" grep -q 'ci/github-acti
 check "README.md links checksums.txt" grep -q 'checksums\.txt' "$REPO_DIR/README.md"
 check "AGENTS.md references checksums.txt" grep -q "checksums.txt" "$REPO_DIR/AGENTS.md"
 check "AGENTS.md references docs/runbooks.md" grep -q "docs/runbooks.md" "$REPO_DIR/AGENTS.md"
+
+
+check "Main scheduled prompt requires exact parent handoff" grep -Fxq 'EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop (B1–B3) now' "$REPO_DIR/docs/routine-main.md"
+check "Assist scheduled prompt requires exact parent handoff" grep -Fxq 'EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop now' "$REPO_DIR/docs/routine-assist.md"
+check "daily export check is executable and documented" bash -c 'test -x "$1/export-freshness.sh" && grep -q "export-freshness.sh" "$1/README.md"' _ "$REPO_DIR"
 
 echo
 echo "ci-install test: $PASS_N passed, $FAIL_N failed"

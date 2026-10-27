@@ -3,7 +3,8 @@
 A box backup only contains the box's synced local copy of transcripts. The authoritative server copy of
 each bot's conversation, and the bots' + owner's shared memory, can only be read with the Grok Bot
 tools `ReadTranscript` and `RecallMemory`. **These are bot tools, not programs: cron / `scheduler.sh`
-cannot call them.** So the daily routines of the two Grok Box bots ([bots.md](bots.md)) pull the pages, and
+cannot call them.** Scheduled runs also lack ReadTranscript and cannot talk to the owner. They export
+memory with RecallMemory and always hand off to their parent chats. Those chats ([bots.md](bots.md)) pull the pages, and
 `server-export-merge.py` merges them into `staging/server-export/`, which every snapshot already includes.
 GrokBox-Main exports every bot except itself; GrokBox-Assist exports Main and the primary bot's main chat.
 The script takes a lock, so both bots may run it at the same time.
@@ -33,9 +34,13 @@ the export exactly) or rewritten via temp file + rename; the exported byte lengt
 mid-write never leaves a half-written line or a duplicated page behind.
 
 ## Daily routines
-The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + export of all bots) and
-[routine-assist.md](routine-assist.md) (exports Main + the primary chat, watches Main). Setup:
-[../AGENTS.md](../AGENTS.md) step 8. The export loop both use:
+The ready-to-paste prompts are [routine-main.md](routine-main.md) (scheduled health + memory + handoff; parent chat exports all other bots) and
+[routine-assist.md](routine-assist.md) (scheduled health + memory + handoff; parent chat exports Main + the primary chat and watches Main). Setup:
+[../AGENTS.md](../AGENTS.md) step 8. Store only each template's **Scheduled run** prompt in UpdateRoutine.
+Every run returns its explicit EXPORT NOT DONE handoff, even when healthy. Steps 1–3 below run in
+the **parent chat**, never the scheduled run; steps 4–6 can run in the schedule. After paging, the
+chat checks INDEX.md and requires `./export-freshness.sh` to print OK. Only problems go to the owner.
+The shared steps:
 1. Call `ReadTranscript {in: <id>, limit: 200}` for each id to export (newest page), in parallel, `write_to_file: true`.
 2. `python3 <repo>/server-export-merge.py ingest --remove <result files>` — **check the exit code, not
    the printed JSON**. In a bot's shell the exit code must be made visible, because `|| rc=$?` alone
@@ -55,7 +60,7 @@ The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + expo
 3. For each `id: N` call `ReadTranscript {in: id, limit: 200, before: N}` (`"newest"`: without `before`),
    then ingest only those new result files (step 2). Repeat until `ingest_rc=0` and `{}`. For long
    backlogs you may fire `before: N, N-35, N-70, ...` in parallel; overlaps are de-duplicated and any
-   gap reappears in the output.
+   gap reappears in the output. Stop after 30 rounds and report if not done.
 4. `RecallMemory` with generic queries, then
    `server-export-merge.py memory --remove --out <bot>-and-shared --label <bot> <files>` (at most ~15 facts per query).
    Use `write_to_file: true` if the tool offers it. Some bots' RecallMemory has no such option and returns the
@@ -64,7 +69,7 @@ The ready-to-paste prompts are [routine-main.md](routine-main.md) (health + expo
    The quoted delimiter stops the shell from expanding `$`, backticks or `\` in the facts; an unusual
    delimiter (not `EOF`) cannot end the heredoc early, and a per-bot file name keeps two bots running at
    the same time from overwriting each other's files. `--remove` deletes them afterwards.
-5. `server-export-merge.py age --max-hours 26 <partner-covered ids>`: exit 1 = the partner's run is missing.
+5. `server-export-merge.py age --max-hours 26 <partner-covered ids>`: exit 1 = the partner's export is missing.
 6. Check `INDEX.md`: no `gap` rows and no warnings. The next hourly snapshot picks everything up.
 
 A bot that is renamed keeps one file: the transcript file is renamed to the new slug. `repair` merges files
