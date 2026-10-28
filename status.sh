@@ -47,7 +47,7 @@ else   # a first success exists: the daily check must keep running (reference: l
     problems=1; echo "!! last check is $(( (now - ref) / 3600 ))h old or never ran (expected daily)"; fi
 fi
 if lock_busy; then
-  bp=$(pgrep -f "$GB_BIN/restic .* (backup|restore|prune|check|forget)" | head -1)
+  bp=$(pgrep -f "$GB_BIN/restic .* (backup|restore|prune|check|forget|tag|snapshots|stats)" | head -1)
   if [[ -n "$bp" ]]; then echo "Running now: restic pid $bp for $(ps -o etime= -p "$bp" | tr -d ' ')"
   else echo "Running now: lock held (preparing)"; fi
   problem=$(lock_problem)
@@ -74,7 +74,7 @@ if [[ -s "$GB_STATE/last-success" ]]; then   # test restore: monthly, so allow 3
 fi
 if [[ "${1:-}" == --local ]]; then echo "Overall: $([[ $problems == 0 ]] && echo OK || echo ATTENTION NEEDED)"; exit 0; fi
 if [[ -s "$RESTIC_PASSWORD_FILE" ]] && { ! is_rclone_repo || [[ -s "$RCLONE_CONFIG" ]]; }; then
-  if snap_out=$(R snapshots --host "$BACKUP_HOST" --json 2>/dev/null | python3 -c '
+  if snap_out=$(R snapshots --no-lock --host "$BACKUP_HOST" --json 2>/dev/null | python3 -c '
 import json,sys
 s=sorted(json.load(sys.stdin),key=lambda x:x["time"])
 if not s: print("Snapshots: 0 (first backup not finished yet)"); sys.exit()
@@ -87,6 +87,6 @@ if sm: print(f"""Latest snapshot: {sm.get("total_files_processed")} files, {sm.g
     echo "$snap_out"
     if [[ "$snap_out" == "Snapshots: 0"* ]]; then problems=1; echo "!! repository is empty (no snapshots yet)"; fi
   else problems=1; echo "!! could not list snapshots in the repository"; fi
-  R stats --mode raw-data --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(f"""Repo size: {d["total_size"]/1e9:.2f} GB""")' 2>/dev/null || true
+  R stats --no-lock --mode raw-data --json 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);print(f"""Repo size: {d["total_size"]/1e9:.2f} GB""")' 2>/dev/null || true
 else problems=1; echo "Not configured yet (missing restic password file or rclone.conf)."; fi
 echo "Overall: $([[ $problems == 0 ]] && echo OK || echo ATTENTION NEEDED)"

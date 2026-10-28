@@ -58,7 +58,7 @@ RTMP=""; trap '[[ -n "$RTMP" ]] && rm -rf "$RTMP" || true' EXIT   # private scra
 # --host guard for this box (a wrong name would silently restore nothing): needs the snapshot list
 if (( ${#HOSTARG[@]} )); then
   RTMP=$(mktemp -d "${TMPDIR:-/tmp}/grokbox-restore.XXXXXX")
-  if ! R_TIMEOUT=600 R snapshots --json > "$RTMP/hosts.json" 2>>"$LOG"; then
+  if ! R_TIMEOUT=600 R snapshots --no-lock --json > "$RTMP/hosts.json" 2>>"$LOG"; then
     echo "ERROR: cannot list snapshots in $RESTIC_REPOSITORY (Drive/auth/password problem?)" >&2; exit 7; fi
   hrc=0; python3 - "$RTMP/hosts.json" "$BACKUP_HOST" <<'PY2' || hrc=$?
 import json,sys
@@ -79,8 +79,8 @@ PY2
   [[ "$hrc" == 0 ]] || exit 7
 fi
 case "${1:-}" in
-  list) R snapshots "${HOSTARG[@]}"; exit;;
-  ls) R ls "${HOSTARG[@]}" "${2:-latest}" ${3:+"$3"}; exit;;
+  list) R snapshots --no-lock "${HOSTARG[@]}"; exit;;
+  ls) R ls --no-lock "${HOSTARG[@]}" "${2:-latest}" ${3:+"$3"}; exit;;
 esac
 SNAP="$1"; shift; MISSING=0; YES=0
 while [[ "${1:-}" == --missing-only || "${1:-}" == --yes ]]; do

@@ -21,6 +21,8 @@ GB_BIN="$TMP/bin"; GB_SECRETS="$TMP/fixture"; GB_STATE="$TMP/state"
 GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
 export AGENTS_DIR="$TMP/agents"
+export DELETED_BOTS_FILE="$TMP/no-deleted-agents.json"
+BACKUP_HOST=testhost; SNAPSHOT_LIST_RETRY_S=0
 export RESTIC_REPOSITORY="$TMP/local-repo"
 BACKUP_ROOTS=("$TMP/src"); QUICK_ROOTS=("$TMP/src")
 SQLITE_GLOBS=(); BRAIN_AGENT_DIRS=(); STORES_GLOB="$TMP/no-stores/*"
@@ -35,20 +37,71 @@ echo fixture > "$TMP/src/unreadable"
 mkdir -p "$TMP/state/rebuild-kit"; touch "$TMP/state/rebuild-kit/inventory.txt"
 cat > "$TMP/bin/restic" <<'PY'
 #!/usr/bin/env python3
-import json,os,sys
+import json,os,sys,time
 from pathlib import Path
 root=Path(os.environ['TEST_ROOT']); args=sys.argv[1:]; cmd=args[0]
 with (root/'calls').open('a') as f: f.write(cmd+'\n')
 with (root/'args').open('a') as f: f.write(' '.join(args)+'\n')
-if cmd=='snapshots':
-    if (os.environ.get('FAIL_RETENTION')=='1' and 'incomplete' in args) or os.environ.get('FAIL_SNAPSHOTS')=='1' or ('--latest' in args and os.environ.get('FAIL_LATEST')=='1'): sys.exit(1)
-    print(json.dumps([{'short_id':'abcdef12','id':'abcdef12'}] if '--latest' in args else []))
-elif cmd=='tag':
-    counter=root/'tag-count'
+def count(name):
+    counter=root/name
     n=int(counter.read_text())+1 if counter.exists() else 1
     counter.write_text(str(n))
-    if n<=int(os.environ.get('TAG_FAILURES','0')): sys.exit(1)
+    return n
+snapshot=root/'snapshot.json'
+old_snapshot=root/'snapshot-old.json'
+if os.environ.get('RESTIC_SLEEP')=='1':
+    (root/'restic-ready').touch()
+    while (root/'restic-wait').exists(): time.sleep(.05)
+    sys.exit(0)
+if cmd=='snapshots':
+    n=count('list-count')
+    if (n<=int(os.environ.get('LIST_FAILURES','0')) or
+        str(n) in os.environ.get('LIST_FAIL_AT','').split(',') or
+        (os.environ.get('FAIL_RETENTION')=='1' and 'incomplete' in args) or
+        os.environ.get('FAIL_SNAPSHOTS')=='1'):
+        print('Fatal: repository is already locked by PID 123 on testhost' if os.environ.get('LIST_LOCKED')=='1' else 'fixture listing failure',file=sys.stderr)
+        print('discard this partial output')
+        sys.exit(int(os.environ.get('LIST_RC','1')))
+    snaps=[json.loads(snapshot.read_text())] if snapshot.exists() else []
+    if old_snapshot.exists(): snaps.insert(0,json.loads(old_snapshot.read_text()))
+    if '--tag' in args: snaps=[s for s in snaps if args[args.index('--tag')+1] in s['tags']]
+    print(json.dumps(snaps))
+elif cmd=='tag':
+    n=count('tag-count')
+    if n<=int(os.environ.get('TAG_LOCKED','0')) or (root/'repo-lock').exists():
+        (root/'repo-lock').touch()
+        print('Fatal: repository is already locked by PID 123 on testhost',file=sys.stderr)
+        sys.exit(1)
+    if n<=int(os.environ.get('TAG_FAILURES','0')):
+        print('Fatal: unable to create lock in backend: fixture network error' if os.environ.get('TAG_NETWORK')=='1' else 'fixture tag failure',file=sys.stderr)
+        sys.exit(1)
+    if n<=int(os.environ.get('TAG_NOOP','0')):
+        print('unable to modify the tags: ignoring; no snapshots were modified')
+        sys.exit(0)
+    snap=json.loads(snapshot.read_text())
+    if args[-1]!=snap['id']:
+        print('no snapshots were modified')
+        sys.exit(0)
+    duplicate=os.environ.get('TAG_DUP')=='1' and n==1
+    if duplicate: old_snapshot.write_text(json.dumps(snap))
+    old=snap['id']; snap['id']='cdefab34'; snap['short_id']=snap['id']; snap['original']=old
+    remove=args[args.index('--remove')+1].split(',') if '--remove' in args else []
+    snap['tags']=[t for t in snap['tags'] if t not in remove]
+    if '--add' in args: snap['tags'].append(args[args.index('--add')+1])
+    snapshot.write_text(json.dumps(snap))
+    if duplicate or n<=int(os.environ.get('TAG_PARTIAL','0')): sys.exit(1)
+elif cmd=='unlock':
+    (root/'repo-lock').unlink(missing_ok=True)
+elif cmd=='stats':
+    print(json.dumps({'total_size':42}))
+elif cmd=='ls':
+    print(json.dumps({'struct_type':'node','type':'file','path':str(root/'src/unreadable'),
+                      'size':8,'mtime':'2000-01-01T00:00:00Z'}))
+elif cmd=='restore':
+    target=Path(args[args.index('--target')+1]); dest=target/str(root/'src/unreadable').lstrip('/')
+    dest.parent.mkdir(parents=True,exist_ok=True); dest.write_text('fixture\n')
 elif cmd=='backup':
+    old_snapshot.unlink(missing_ok=True)
     assert os.environ.get('RESTIC_PROGRESS_FPS') == '0.01'
     print(json.dumps({'message_type':'status','percent_done':0.5}))
     if os.environ.get('NOTICE')=='1': print('rclone: rate limit notice')
@@ -59,6 +112,10 @@ elif cmd=='backup':
         print(json.dumps({'message_type':'error','during':'archival','item':str(root/'src'/os.environ.get('ERROR_FILE','unreadable')),
                           'error':{'message':'open: permission denied' if kind=='permission' else 'repository read failure'}}))
     if rc in (0,3):
+        tags=[args[i+1] for i,a in enumerate(args) if a=='--tag']
+        host=args[args.index('--host')+1]
+        snapshot.write_text(json.dumps({'id':'abcdef12','short_id':'abcdef12','tags':tags,
+                                       'time':'2000-01-01T00:00:00Z','hostname':host,'paths':[str(root/'src')]}))
         print(json.dumps({'message_type':'summary','snapshot_id':'abcdef12','total_files_processed':2,
                           'total_bytes_processed':42,'data_added_packed':12}))
     sys.exit(rc)
@@ -91,6 +148,10 @@ chmod +x "$TMP/bin/"*
 run_backup() { local rc=0; "$REPO_DIR/backup.sh" --no-forget > "$TMP/backup.out" 2>&1 || rc=$?; [[ "$rc" == "$1" ]]; }
 check 'complete backup writes atomic result' run_backup 0
 check 'complete metrics recorded' grep -qx 'bytes=42' "$TMP/state/last-backup.result"
+check 'normal backup lists snapshots exactly twice' python3 - "$TMP/args" <<'PYLISTS'
+import sys
+assert sum(line.startswith('snapshots ') for line in open(sys.argv[1])) == 2
+PYLISTS
 for rc in 124 137; do
   export FAKE_RC=$rc
   check "timeout $rc returned" run_backup "$rc"
@@ -141,12 +202,12 @@ check 'garbled backup result blocks prune' not grep -qx prune "$TMP/calls"
 
 # Remote bookkeeping failures must not discard a successful backup or daily check.
 export FAKE_RC=0
-rm -f "$TMP/tag-count"
-export TAG_FAILURES=1 FAIL_LATEST=1
-check 'tag retries and failed ID lookup preserve success' run_backup 0
+rm -f "$TMP/tag-count" "$TMP/list-count"
+export TAG_FAILURES=1 LIST_FAIL_AT=2,3
+check 'tag retries after resolver listing failure preserve success' run_backup 0
 check 'tag retried once' test "$(cat "$TMP/tag-count")" = 2
-check 'lookup fallback records complete' grep -qx result=complete "$TMP/state/last-backup.result"
-unset TAG_FAILURES FAIL_LATEST
+check 'resolver fallback records verified complete result' grep -qx result=complete "$TMP/state/last-backup.result"
+unset TAG_FAILURES LIST_FAIL_AT
 check 'progress status records excluded from log' not grep -q '"message_type": "status"' "$TMP/logs/backup-$(date +%Y-%m).log"
 export FAIL_SNAPSHOTS=1
 : > "$TMP/calls"
@@ -162,6 +223,153 @@ unset FAIL_RETENTION
 : > "$TMP/args"
 "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
 check 'incomplete snapshots have bounded retention' grep -q -- '--tag incomplete --keep-within 7d' "$TMP/args"
+
+# Promotion must wait, recover stale locks once, and verify the resulting snapshot.
+reset_promotion() {
+  rm -f "$TMP/tag-count" "$TMP/list-count" "$TMP/repo-lock" "$TMP/state/ALERT" "$TMP/state/alert-seen"
+  : > "$TMP/calls"; : > "$TMP/args"
+}
+run_full_backup() { local rc=0; "$REPO_DIR/backup.sh" > "$TMP/backup.out" 2>&1 || rc=$?; [[ "$rc" == "$1" ]]; }
+verified_snapshot() {
+  python3 - "$TMP/snapshot.json" "$TMP/state/last-backup.result" <<'PYVERIFY'
+import json,sys
+s=json.load(open(sys.argv[1])); result=open(sys.argv[2]).read().splitlines()
+assert 'incomplete' not in s['tags'] and 'auto' in s['tags']
+assert 'snapshot='+s['short_id'] in result and 'result=complete' in result
+PYVERIFY
+}
+reset_promotion
+export TAG_LOCKED=1
+check 'locked promotion recovers and completes' run_backup 0
+check 'promotion waits up to default 2m' grep -q '^tag --retry-lock 2m --remove incomplete --add auto abcdef12$' "$TMP/args"
+check 'lock recovery runs exactly one plain unlock' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'unlock never removes active locks' not grep -q -- '--remove-all' "$TMP/args"
+check 'lock recovery raises unlock alert' grep -q 'plain restic unlock (stale locks only) was run before retrying' "$TMP/state/ALERT"
+check 'recovered snapshot verified and current ID recorded' verified_snapshot
+unset TAG_LOCKED
+
+reset_promotion
+export TAG_NOOP=2
+check 'successful tag no-op exits incomplete' run_full_backup 6
+check 'no-op records incomplete result' grep -qx result=incomplete "$TMP/state/last-backup.result"
+check 'no-op alert explains failed verification' grep -q 'could not be verified as promoted' "$TMP/state/ALERT"
+check 'no-op never logs backup ok' not grep -q 'backup ok' "$TMP/backup.out"
+check 'no-op never forgets' not grep -qx forget "$TMP/calls"
+check 'no-op recovery unlocks only once' test "$(grep -cx unlock "$TMP/args")" = 1
+unset TAG_NOOP
+
+reset_promotion
+export TAG_PARTIAL=1
+check 'partial tag rewrite resolves original ID on retry' run_backup 0
+check 'partial rewrite never tags stale ID again' test "$(grep -c '^tag .* abcdef12$' "$TMP/args")" = 1
+check 'already promoted rewrite needs no second tag' test "$(cat "$TMP/tag-count")" = 1
+check 'partial rewrite is verified and records new ID' verified_snapshot
+unset TAG_PARTIAL
+
+reset_promotion
+export TAG_DUP=1
+check 'duplicate rewrite with old record first resolves promoted record' run_backup 0
+check 'duplicate rewrite needs only one tag call' test "$(cat "$TMP/tag-count")" = 1
+check 'duplicate rewrite records verified promoted ID' verified_snapshot
+unset TAG_DUP
+
+reset_promotion
+export TAG_LOCKED=2
+check 'persistent repository lock exits incomplete' run_full_backup 6
+check 'persistent lock recovery unlocks only once' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'persistent lock final alert names repository lock' grep -q 'could not promote snapshot to complete; retention skipped; repository is locked' "$TMP/state/ALERT"
+check 'persistent lock skips forget' not grep -qx forget "$TMP/calls"
+unset TAG_LOCKED
+
+reset_promotion
+export TAG_FAILURES=2 TAG_NETWORK=1
+check 'network failure creating lock exits incomplete' run_full_backup 6
+check 'network failure recovery unlocks exactly once' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'network failure final alert uses generic tag failure' grep -q 'could not promote snapshot to complete; retention skipped; restic tag failed rc=1' "$TMP/state/ALERT"
+check 'network failure alert does not claim repository is locked' not grep -q 'repository is locked' "$TMP/state/ALERT"
+unset TAG_FAILURES TAG_NETWORK
+
+leftovers=("$TMP/state"/{snapshot-list,promote-list,promote-error,promote-tag}.fixture)
+touch "${leftovers[@]}"
+check 'backup sweeps abandoned promotion and listing files' run_backup 0
+check 'all abandoned temporary files are gone' python3 - "${leftovers[@]}" <<'PYLEFTOVERS'
+import os,sys
+assert not any(os.path.exists(path) for path in sys.argv[1:])
+PYLEFTOVERS
+touch "${leftovers[@]}"
+rc=0; "$REPO_DIR/backup.sh" --dry-run > "$TMP/backup.out" 2>&1 || rc=$?
+check 'dry-run with abandoned temporary files succeeds' test "$rc" = 0
+check 'dry-run preserves all abandoned temporary files' python3 - "${leftovers[@]}" <<'PYLEFTOVERS'
+import os,sys
+assert all(os.path.exists(path) for path in sys.argv[1:])
+PYLEFTOVERS
+
+reset_promotion
+export LIST_FAILURES=1
+check 'transient listing failure retries and backup proceeds' run_backup 0
+check 'retry truncates partial JSON output' not grep -q 'discard this partial output' "$TMP/state/snapshots.json"
+unset LIST_FAILURES
+for style in locked plain; do
+  reset_promotion
+  export FAIL_SNAPSHOTS=1
+  [[ $style != locked ]] || export LIST_LOCKED=1
+  check "$style pre-listing failure exits 7" run_backup 7
+  check "$style pre-listing failure retries exactly once" test "$(cat "$TMP/list-count")" = 2
+  if [[ $style == locked ]]; then
+    check 'pre-listing lock alert identifies repository lock' grep -q 'repository is locked (stale lock?) so snapshots could not be listed' "$TMP/state/ALERT"
+  else check 'plain pre-listing failure retains Drive/auth alert' grep -q 'Drive/auth problem?' "$TMP/state/ALERT"; fi
+  check "$style pre-listing failure never runs backup" not grep -qx backup "$TMP/calls"
+  unset FAIL_SNAPSHOTS LIST_LOCKED
+done
+
+reset_promotion
+export FAIL_SNAPSHOTS=1 LIST_RC=124
+check 'timed-out pre-listing exits 7' run_backup 7
+check 'timed-out pre-listing is not retried' test "$(cat "$TMP/list-count")" = 1
+unset FAIL_SNAPSHOTS LIST_RC
+
+reset_promotion
+check 'complete backup with retention succeeds' run_full_backup 0
+"$REPO_DIR/status.sh" > "$TMP/status.out" 2>&1
+"$REPO_DIR/report.sh" --no-upload > "$TMP/report.out" 2>&1
+"$REPO_DIR/restore.sh" list > "$TMP/restore-list.out" 2>&1
+"$REPO_DIR/restore.sh" ls latest > "$TMP/restore-ls.out" 2>&1
+"$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
+"$REPO_DIR/test-restore.sh" > "$TMP/test-restore.out" 2>&1
+check 'all read-only listings use no-lock and writes do not' python3 - "$TMP/args" <<'PYARGS'
+import sys
+calls=[l.split() for l in open(sys.argv[1])]
+for cmd in ('snapshots','stats','ls'):
+    rows=[a for a in calls if a[0]==cmd]
+    assert rows and all('--no-lock' in a for a in rows), (cmd,rows)
+for cmd in ('tag','backup','unlock','forget','prune','check','restore'):
+    assert all('--no-lock' not in a for a in calls if a[0]==cmd), cmd
+assert ['unlock'] in calls
+PYARGS
+month_log="$TMP/logs/backup-$(date +%Y-%m).log"
+check 'restic log identifies backup caller PID and command' grep -Eq 'restic call: caller=backup.sh:main pid=[0-9]+ ppid=[0-9]+ wrapper=R cmd=backup ' "$month_log"
+check 'forget logs RT wrapper' grep -Eq 'restic call: .*wrapper=RT cmd=forget ' "$month_log"
+check 'restic call log excludes transport options and password text' not grep -E 'restic call:.*(-o rclone|restic-pass|synthetic test fixture|RESTIC_PASSWORD)' "$month_log"
+check 'promotion temporary files are removed' test -z "$(find "$TMP/state" -maxdepth 1 -name 'promote-*' -o -name 'snapshot-list.*')"
+
+# Logging also preserves stdout and status when the log cannot be opened.
+# shellcheck disable=SC2016 # evaluated in the child
+bash -c 'source "$1/lib.sh"; LOG="$TEST_ROOT/no-dir/log"; R stats --no-lock --json; RT forget; R check' _ "$REPO_DIR" > "$TMP/wrappers.out" 2> "$TMP/wrappers.err"
+check 'unwritable log preserves restic stdout' grep -qx '{"total_size": 42}' "$TMP/wrappers.out"
+check 'unwritable log does not leak diagnostics' test ! -s "$TMP/wrappers.err"
+
+# Read-only restic processes and tag must be visible while the backup flock is held.
+for subcommand in tag snapshots stats; do
+  touch "$TMP/restic-wait"; rm -f "$TMP/restic-ready" "$TMP/status-lock-ready"
+  RESTIC_SLEEP=1 "$TMP/bin/restic" -o x "$subcommand" --fixture & RP=$!; CHILDREN+=("$RP")
+  # shellcheck disable=SC2016 # evaluated in the child
+  bash -c 'exec 9>>"$1/state/backup.lock"; flock 9; touch "$1/status-lock-ready"; exec sleep 120' _ "$TMP" & LP=$!; CHILDREN+=("$LP")
+  for _ in {1..100}; do [[ -e "$TMP/restic-ready" && -e "$TMP/status-lock-ready" ]] && break; sleep .05; done
+  "$REPO_DIR/status.sh" --local > "$TMP/status.out" 2>&1
+  check "status detects running restic $subcommand" grep -q "Running now: restic pid $RP " "$TMP/status.out"
+  rm -f "$TMP/restic-wait"; wait "$RP"
+  kill "$LP"; wait "$LP" 2>/dev/null || true; CHILDREN=()
+done
 
 # Execute the restart handoff's stop branch under errexit with a refused stop.
 python3 - "$REPO_DIR/install.sh" > "$TMP/handoff.sh" <<'PYHANDOFF'

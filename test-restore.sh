@@ -29,7 +29,7 @@ if [[ "${GB_LOCK_HELD:-0}" != 1 ]]; then
   took_lock test-restore "$MODE"
 fi
 if [[ -z "$SNAP" ]]; then
-  SNAP=$(R snapshots --host "$BACKUP_HOST" --tag auto --json 2>>"$LOG" | python3 -c 'import json,sys;s=sorted(json.load(sys.stdin),key=lambda x:x["time"]);print(s[-1]["id"] if s else "")') \
+  SNAP=$(R snapshots --no-lock --host "$BACKUP_HOST" --tag auto --json 2>>"$LOG" | python3 -c 'import json,sys;s=sorted(json.load(sys.stdin),key=lambda x:x["time"]);print(s[-1]["id"] if s else "")') \
     || fail "cannot list snapshots: restic snapshots failed or timed out, rc=$? (124 = timed out; see $LOG)"
   [[ -n "$SNAP" ]] || { log "test-restore: no hourly snapshot yet; nothing to test"; exit 0; }
 fi
@@ -38,7 +38,7 @@ T="$RESTORE_BASE/restore-test-$(date +%Y%m%d-%H%M%S)"; mkdir -p "$T"; chmod 700 
 work=$(mktemp -d); chmod 700 "$work"; trap 'rm -rf "$work" "$T"' EXIT
 log "test-restore ($MODE): snapshot ${SNAP:0:8} -> $T"
 # full listing of the snapshot (JSON lines) -> critical paths + random small files
-R ls --json "$SNAP" > "$work/ls.jsonl" 2>>"$LOG" \
+R ls --no-lock --json "$SNAP" > "$work/ls.jsonl" 2>>"$LOG" \
   || fail "cannot read snapshot ${SNAP:0:8}: restic ls failed or timed out, rc=$? (124 = timed out; see $LOG)"
 python3 - "$work/ls.jsonl" "${TEST_RESTORE_RANDOM_FILES:-25}" "$GB_CONFIG" "$GB_STAGING/brain" "$GB_STAGING/server-export" "$GB_STAGING/sqlite" "${TEST_RESTORE_PATHS[@]}" > "$work/includes.txt" <<'PY'
 import json,sys,random
