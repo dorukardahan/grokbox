@@ -68,6 +68,10 @@ if cmd=='snapshots':
     print(json.dumps(snaps))
 elif cmd=='tag':
     n=count('tag-count')
+    if '--remove' in args and args[args.index('--remove')+1]=='auto,quick':
+        if count('cleanup-count')<=int(os.environ.get('CLEANUP_LOCKED','0')):
+            print('Fatal: repository is already locked by PID 123 on testhost',file=sys.stderr)
+            sys.exit(1)
     if n<=int(os.environ.get('TAG_LOCKED','0')) or (root/'repo-lock').exists():
         (root/'repo-lock').touch()
         print('Fatal: repository is already locked by PID 123 on testhost',file=sys.stderr)
@@ -101,6 +105,9 @@ elif cmd=='restore':
     target=Path(args[args.index('--target')+1]); dest=target/str(root/'src/unreadable').lstrip('/')
     dest.parent.mkdir(parents=True,exist_ok=True); dest.write_text('fixture\n')
 elif cmd=='backup':
+    if count('backup-count')<=int(os.environ.get('BACKUP_LOCKED','0')):
+        print('Fatal: repository is already locked by PID 123 on testhost',file=sys.stderr)
+        sys.exit(1)
     old_snapshot.unlink(missing_ok=True)
     assert os.environ.get('RESTIC_PROGRESS_FPS') == '0.01'
     print(json.dumps({'message_type':'status','percent_done':0.5}))
@@ -121,6 +128,11 @@ elif cmd=='backup':
     sys.exit(rc)
 elif cmd=='check':
     sys.exit(int(os.environ.get('FAKE_CHECK_RC','0')))
+elif cmd=='forget' and '--tag' in args:
+    tag=args[args.index('--tag')+1]
+    if count('forget-'+tag+'-count')<=int(os.environ.get('FORGET_LOCKED','0')):
+        print('Fatal: repository is already locked by PID 123 on testhost',file=sys.stderr)
+        sys.exit(1)
 PY
 cat > "$TMP/bin/rclone" <<'PY'
 #!/usr/bin/env python3
@@ -227,6 +239,7 @@ check 'incomplete snapshots have bounded retention' grep -q -- '--tag incomplete
 # Promotion must wait, recover stale locks once, and verify the resulting snapshot.
 reset_promotion() {
   rm -f "$TMP/tag-count" "$TMP/list-count" "$TMP/repo-lock" "$TMP/state/ALERT" "$TMP/state/alert-seen"
+  rm -f "$TMP/backup-count" "$TMP"/forget-*-count "$TMP/cleanup-count"
   : > "$TMP/calls"; : > "$TMP/args"
 }
 run_full_backup() { local rc=0; "$REPO_DIR/backup.sh" > "$TMP/backup.out" 2>&1 || rc=$?; [[ "$rc" == "$1" ]]; }
@@ -288,6 +301,112 @@ check 'network failure recovery unlocks exactly once' test "$(grep -cx unlock "$
 check 'network failure final alert uses generic tag failure' grep -q 'could not promote snapshot to complete; retention skipped; restic tag failed rc=1' "$TMP/state/ALERT"
 check 'network failure alert does not claim repository is locked' not grep -q 'repository is locked' "$TMP/state/ALERT"
 unset TAG_FAILURES TAG_NETWORK
+
+# Backup and retention share promotion's unlock budget, but retain their own retry waits.
+reset_promotion
+export BACKUP_LOCKED=1
+check 'locked backup retries and exits successfully' run_full_backup 0
+check 'backup retry completes hourly result' verified_snapshot
+check 'locked backup runs exactly one plain unlock' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'backup lock recovery raises one alert' test "$(grep -c 'backup (auto): repository was locked; plain restic unlock' "$TMP/state/ALERT")" = 1
+check 'backup retry uses identical args with lock wait' python3 - "$TMP/args" <<'PYBACKUP'
+import sys
+rows=[line.split() for line in open(sys.argv[1]) if line.startswith('backup ')]
+assert len(rows)==2 and rows[0]==rows[1]
+assert rows[0][1:3]==['--retry-lock','2m']
+PYBACKUP
+unset BACKUP_LOCKED
+
+reset_promotion
+export BACKUP_LOCKED=2
+check 'persistent backup lock returns failure' run_full_backup 1
+check 'persistent backup lock unlocks only once' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'persistent backup lock alerts final lock failure' grep -q 'restic backup (auto) failed rc=1; repository is locked' "$TMP/state/ALERT"
+check 'persistent backup lock result is failed' grep -qx result=failed "$TMP/state/last-backup.result"
+check 'persistent backup lock never forgets' not grep -qx forget "$TMP/calls"
+unset BACKUP_LOCKED
+
+reset_promotion
+export BACKUP_LOCKED=1 TAG_LOCKED=1
+check 'backup recovery cannot unlock again for promotion' run_full_backup 6
+check 'backup and promotion share exactly one plain unlock' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'promotion lock after backup recovery blocks retention' not grep -qx forget "$TMP/calls"
+unset BACKUP_LOCKED TAG_LOCKED
+
+for job in backup check; do
+  reset_promotion
+  export FORGET_LOCKED=1
+  rc=0; "$REPO_DIR/$job.sh" > "$TMP/retention.out" 2>&1 || rc=$?
+  check "$job retention recovers a lock error" test "$rc" = 0
+  check "$job retention uses one plain unlock total" test "$(grep -cx unlock "$TMP/args")" = 1
+  check "$job retention retries each forget once with lock wait" python3 - "$TMP/args" <<'PYFORGET'
+import sys
+rows=[line.split() for line in open(sys.argv[1]) if line.startswith('forget ')]
+assert len(rows)==6 and all(row[1:3]==['--retry-lock','2m'] for row in rows)
+for tag in ('auto','quick','incomplete'):
+    assert sum(row[row.index('--tag')+1]==tag for row in rows)==2
+PYFORGET
+  check "$job recovered forget does not alert failure" not grep -q 'forget (auto) failed' "$TMP/retention.out"
+  check "$job recovery never removes active locks" not grep -q -- '--remove-all' "$TMP/args"
+  unset FORGET_LOCKED
+done
+
+for job in backup check; do
+  reset_promotion
+  export FORGET_LOCKED=9
+  [[ $job != backup ]] || export TAG_LOCKED=1
+  rc=0; "$REPO_DIR/$job.sh" > "$TMP/retention.out" 2>&1 || rc=$?
+  check "$job persistent forget failure preserves exit success" test "$rc" = 0
+  check "$job persistent forget lock alerts failure" grep -q 'forget (auto) failed' "$TMP/state/ALERT"
+  check "$job persistent forget shares one unlock across the run" test "$(grep -cx unlock "$TMP/args")" = 1
+  unset FORGET_LOCKED TAG_LOCKED
+done
+
+# A legacy incomplete snapshot must lose its complete tags before retention.
+reset_promotion
+python3 - "$TMP/snapshot.json" <<'PYLEGACY'
+import json,sys
+p=sys.argv[1]; s=json.load(open(p)); s['tags']=['incomplete','auto','quick']
+open(p,'w').write(json.dumps(s))
+PYLEGACY
+export CLEANUP_LOCKED=1
+rc=0; "$REPO_DIR/check.sh" > "$TMP/retention.out" 2>&1 || rc=$?
+check 'retention tag cleanup retries lock error successfully' test "$rc" = 0
+check 'retention cleanup waits for lock on both attempts' test "$(grep -c '^tag --retry-lock 2m --remove auto,quick ' "$TMP/args")" = 2
+check 'retention cleanup removes complete tags' python3 - "$TMP/snapshot.json" <<'PYCLEAN'
+import json,sys
+assert json.load(open(sys.argv[1]))['tags']==['incomplete']
+PYCLEAN
+check 'retention cleanup shares startup unlock budget' test "$(grep -cx unlock "$TMP/args")" = 1
+check 'helper removes stderr temporary files' test -z "$(find "$TMP/state" -name 'restic-error.*')"
+unset CLEANUP_LOCKED
+
+# An hourly flock timeout is visible and deduplicated; a quick skip stays quiet.
+reset_promotion
+rm -f "$TMP/skip-ready"
+# shellcheck disable=SC2016 # evaluated in the child
+bash -c 'exec 9>>"$1/state/backup.lock"; flock 9; touch "$1/skip-ready"; exec sleep 120' _ "$TMP" & LP=$!; CHILDREN+=("$LP")
+for _ in {1..100}; do [[ -f "$TMP/skip-ready" ]] && break; sleep .05; done
+echo "$(date +%s) $LP check.sh check" > "$TMP/state/lock-holder"
+for _ in 1 2; do
+  rc=0; "$REPO_DIR/backup.sh" --wait 1 > "$TMP/skip.out" 2>&1 || rc=$?
+  check 'busy hourly backup preserves exit zero' test "$rc" = 0
+done
+check 'hourly lock skip records operator state' python3 - "$TMP/state/backup-skipped" <<'PYSKIP'
+import sys
+d=dict(line.strip().split('=',1) for line in open(sys.argv[1]))
+assert d['time'].isdigit()
+assert {k:d[k] for k in ('mode','reason','holder','waited')}==dict(mode='auto',reason='lock-busy',holder='check.sh',waited='1')
+PYSKIP
+check 'hourly skip alert is raised exactly once' test "$(grep -Fc 'hourly backup skipped: backup lock still busy after waiting 1s (held by check.sh); no hourly snapshot was taken this slot' "$TMP/state/ALERT")" = 1
+rm -f "$TMP/state/backup-skipped" "$TMP/state/ALERT" "$TMP/state/alert-seen"
+rc=0; "$REPO_DIR/backup.sh" --quick > "$TMP/skip.out" 2>&1 || rc=$?
+check 'busy quick backup preserves exit zero' test "$rc" = 0
+check 'busy quick backup creates no skip state or alert' not test -e "$TMP/state/backup-skipped" -o -e "$TMP/state/ALERT"
+"$REPO_DIR/backup.sh" --wait 1 > "$TMP/skip.out" 2>&1
+kill "$LP"; wait "$LP" 2>/dev/null || true; CHILDREN=()
+check 'hourly succeeds once lock is free' run_full_backup 0
+check 'successful hourly clears skip state' test ! -e "$TMP/state/backup-skipped"
 
 leftovers=("$TMP/state"/{snapshot-list,promote-list,promote-error,promote-tag}.fixture)
 touch "${leftovers[@]}"

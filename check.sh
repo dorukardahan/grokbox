@@ -20,6 +20,7 @@ write_check_result() {
 }
 trap write_check_result EXIT
 log "check start"
+GB_UNLOCK_DONE=1
 R unlock >>"$LOG" 2>&1 || log "WARN restic unlock failed"   # removes only stale locks (e.g. left by a killed run)
 if [[ -e "$GUARD_LATCH" ]]; then
   alert "check: forget/prune SKIPPED, stale guard latch ($GUARD_LATCH) is set; it clears after a successful hourly backup"
@@ -28,9 +29,9 @@ elif [[ -e "$SQLITE_LATCH" ]]; then
 elif [[ -e "$GB_STATE/CHECK_FAILED" ]]; then
   log "check: forget skipped; integrity check failure latch is set"
 elif prepare_retention; then
-  RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
-  RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
-  RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
+  restic_retry_unlock RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
+  restic_retry_unlock RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+  restic_retry_unlock RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
 else
   alert "check: retention skipped; incomplete snapshot tags could not be repaired"
 fi

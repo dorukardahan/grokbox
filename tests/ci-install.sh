@@ -59,6 +59,7 @@ export AGENTS_DIR="$TMP/agents"
 export RESTIC_REPOSITORY="$TMP/repo"
 CFG
 export GB_CONFIG="$TMP/config.env"
+export RESTIC_CACHE_DIR="$TMP/cache"   # direct rs calls must also stay inside the fixture
 export RESTIC_BACKUP_PASSWORD="ci-install-test-password-$$"
 
 # Missing entry in checksums.txt when bumping PINNED_RESTIC must fail loudly with hint
@@ -187,6 +188,14 @@ check "runbook covers Drive trash recovery (rclone backend untrash)" grep -q "rc
 check "runbook covers Drive trash recovery (PRUNE_USE_TRASH)" grep -q "PRUNE_USE_TRASH" "$RB_DOC"
 check "runbook covers wrong BACKUP_HOST (rewrite --new-host)" grep -q -- "--new-host" "$RB_DOC"
 check "runbook covers wrong BACKUP_HOST (restore.sh --any-host fallback)" grep -q -- "--any-host" "$RB_DOC"
+check "runbook read-only restic examples do not take locks" python3 - "$RB_DOC" <<'PYNOLOCK'
+import re,sys
+examples=[]
+for line in open(sys.argv[1]):
+    if re.match(r'^\s*(?:R_TIMEOUT=\S+\s+)?(?:restic|R|RT)\s+(?:snapshots|ls|stats|find|cat|list|diff|restore)\b',line):
+        examples.append(line)
+assert examples and all('--no-lock' in line for line in examples)
+PYNOLOCK
 
 # Offline verification of runbook restic commands (repair index + rewrite --new-host --forget)
 if [[ -x "$REPO_DIR/bin/restic" ]]; then

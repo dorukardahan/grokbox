@@ -47,9 +47,17 @@ atomically installed. `--test` never cleans up a concurrent consent flow's files
 ## Snapshot promotion and stale locks
 
 Promotion waits up to `PROMOTE_LOCK_WAIT` (default `2m`) for an exclusive lock.
-After the first failure it runs one plain `restic unlock` (stale locks only),
-raises an alert, and retries once with the snapshot's current ID.
+After the first failure it retries once with the snapshot's current ID,
+using the shared plain-unlock budget below.
 Success requires verifying that `incomplete` is gone and `auto` or `quick` is present.
 Read-only snapshot, file and size listings use `--no-lock`.
 Backup snapshot listings retry once after `SNAPSHOT_LIST_RETRY_S` (default `5` seconds).
 Each restic call logs its caller, wrapper, PID and arguments to the monthly log.
+
+Backup, forget and retention tag cleanup wait up to `LOCK_RETRY_WAIT` (default `2m`)
+per attempt. A lock error triggers one retry; at most one plain `restic unlock`
+(stale locks only) runs across backup, promotion and retention in a script run.
+An unlock before retry raises an alert; daily check's startup unlock uses the same budget.
+An hourly backup that gives up waiting for `backup.lock` exits successfully but alerts
+and records time, mode, reason, holder and waited seconds in `state/backup-skipped`.
+Quick skips stay quiet; the next successful hourly backup clears that file.

@@ -57,6 +57,7 @@ BRAIN_EXPORT_MIN_INTERVAL_MIN=0
 TEST_RESTORE_PATHS=("$SRC/agent-data"); TEST_RESTORE_RANDOM_FILES=10
 CFG
 export GB_CONFIG="$TMP/config.env"
+export RESTIC_CACHE_DIR="$TMP/cache"   # direct rs calls must also stay inside the fixture
 export RESTIC_BACKUP_PASSWORD="smoke-test-password-$$-$RANDOM"
 BIN="$REPO_DIR/bin"; PASSF="$SRC/gb-secrets/restic-pass"
 rs() { "$BIN/restic" -r "$REPO" --password-file "$PASSF" "$@"; }

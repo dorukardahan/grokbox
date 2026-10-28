@@ -17,6 +17,8 @@ source "$GB_CONFIG"
 : "${ALERT_NTFY_URL:=}" "${ALERT_WEBHOOK_URL:=}" "${ALERT_CHANNEL_REQUIRED:=1}"
 : "${EXPORT_MISSED_HOURS:=26}"
 : "${PROMOTE_LOCK_WAIT:=2m}" "${SNAPSHOT_LIST_RETRY_S:=5}"
+: "${LOCK_RETRY_WAIT:=2m}"
+GB_UNLOCK_DONE=0
 : "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
 [[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
 [[ -v EXPECTED_BOTS ]] || EXPECTED_BOTS=()
@@ -217,6 +219,29 @@ RT() { _restic_call_log RT "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" 
 RCL() { timeout -k 30 "${RCLONE_TIMEOUT:-300}" "$GB_BIN/rclone" --config "$RCLONE_CONFIG" "$@"; }
 
 restic_lock_error() { grep -qi 'repository is already locked' "$1"; }
+# Call only while holding backup.lock; share the budget with promotion and check's startup unlock.
+restic_unlock_once() {
+  local what="$1" rc=0
+  [[ $GB_UNLOCK_DONE == 0 ]] || return 0
+  GB_UNLOCK_DONE=1
+  R unlock >>"$LOG" 2>&1 || rc=$?
+  log "$what: plain restic unlock ran rc=$rc"
+  alert "$what: repository was locked; plain restic unlock (stale locks only) was run before retrying"
+}
+restic_retry_unlock() {  # WRAPPER SUBCOMMAND [args...]; keep stdout unchanged
+  local wrapper="$1" cmd="$2" err rc=0; shift 2
+  err=$(mktemp "$GB_STATE/restic-error.XXXXXX")
+  "$wrapper" "$cmd" --retry-lock "$LOCK_RETRY_WAIT" "$@" 2>"$err" || rc=$?
+  cat "$err" >>"$LOG"
+  if (( rc != 0 )) && restic_lock_error "$err"; then
+    restic_unlock_once "$cmd"
+    rc=0
+    "$wrapper" "$cmd" --retry-lock "$LOCK_RETRY_WAIT" "$@" 2>"$err" || rc=$?
+    cat "$err" >>"$LOG"
+  fi
+  rm -f "$err"
+  return "$rc"
+}
 # Retry a transient read once; keep only the final attempt's output and error for the caller.
 snapshot_list() {  # snapshot_list OUTPUT ERROR [snapshots flags...]
   local out="$1" err="$2" attempt rc; shift 2
@@ -378,7 +403,7 @@ prepare_retention() {
   local ids id
   ids=$(R snapshots --no-lock --host "$BACKUP_HOST" --tag incomplete --json | python3 -c 'import json,sys;print("\n".join(s["id"] for s in json.load(sys.stdin) if set(s.get("tags") or []) & {"auto","quick"}))') || return 1
   while IFS= read -r id; do
-    [[ -z "$id" ]] || R tag --remove auto,quick "$id" >>"$LOG" 2>&1 || return 1
+    [[ -z "$id" ]] || restic_retry_unlock R tag --remove auto,quick "$id" >>"$LOG" 2>&1 || return 1
   done <<< "$ids"
 }
 
