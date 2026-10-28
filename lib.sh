@@ -18,6 +18,7 @@ source "$GB_CONFIG"
 : "${EXPORT_MISSED_HOURS:=26}"
 : "${PROMOTE_LOCK_WAIT:=2m}" "${SNAPSHOT_LIST_RETRY_S:=5}"
 : "${LOCK_RETRY_WAIT:=2m}"
+: "${PRUNE_SKIP_PROBLEM_DAYS:=3}" "${HOURLY_MISS_WARN:=1}" "${HOURLY_SLOT_WINDOW_H:=24}"
 GB_UNLOCK_DONE=0
 : "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
 [[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
@@ -170,6 +171,20 @@ epoch_ok() { local v; v=$(num_ok "${1:-}"); [[ -n "$v" ]] && (( v > 0 && v < 858
 kv_num() { num_ok "$(kv_get "$1" "$2")"; }                                    # kv_num FILE KEY
 kv_epoch() { epoch_ok "$(kv_get "$1" "$2")"; }                                # kv_epoch FILE KEY
 epoch_file() { epoch_ok "$(head -c 32 "$1" 2>/dev/null | tr -d '[:space:]\000')"; }   # epoch_file FILE (one timestamp)
+# Diagnostics share the same validated lock-skip record and quick-chain age limit.
+skipped_backup() {
+  local success
+  SKIP_TIME=$(kv_epoch "$GB_STATE/backup-skipped" time)
+  SKIP_HOLDER=$(kv_get "$GB_STATE/backup-skipped" holder)
+  [[ "$SKIP_HOLDER" =~ ^[a-zA-Z0-9._-]{1,64}$ ]] || SKIP_HOLDER=unknown
+  success=$(epoch_file "$GB_STATE/last-success")
+  [[ -n "$SKIP_TIME" ]] && (( SKIP_TIME > ${success:-0} ))
+}
+quick_max_age_s() {
+  local minutes
+  minutes=$(num_ok "$QUICK_EVERY_MIN"); minutes=${minutes:-15}
+  if (( minutes > 40 )); then echo "$(( minutes * 180 ))"; else echo 7200; fi
+}
 # Weekly test restore: date of the most recent TEST_RESTORE_WEEKDAY (0=Sunday..6) whose TEST_RESTORE_AT
 # has passed; prints nothing when TEST_RESTORE_WEEKDAY is empty (weekly run off). scheduler.sh runs
 # test-restore.sh --weekly once per slot (due-based, so a slot missed while the box was off is caught up).

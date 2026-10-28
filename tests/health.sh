@@ -6,6 +6,7 @@
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-health.XXXXXX")"
+export RESTIC_CACHE_DIR="$TMP/cache"
 [[ "$TMP" == /tmp/* || "$TMP" == "${TMPDIR:-/nonexistent}"/* ]] || { echo "refusing: temp dir $TMP is not under /tmp"; exit 1; }
 SCHED_CFG=""; CHILDREN=()
 cleanup() { local p; for p in "${CHILDREN[@]}"; do kill -- "-$p" 2>/dev/null || kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
@@ -113,7 +114,8 @@ nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$T
 
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
 run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
-old=$(mkcfg old 'unset ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+old=$(mkcfg old 'unset PRUNE_SKIP_PROBLEM_DAYS HOURLY_MISS_WARN HOURLY_SLOT_WINDOW_H ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "older config gets prune and hourly visibility defaults" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$PRUNE_SKIP_PROBLEM_DAYS" == 3 && "$HOURLY_MISS_WARN" == 1 && "$HOURLY_SLOT_WINDOW_H" == 24 ]]' _ "$REPO_DIR"
 run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ -z "$ALERT_NTFY_URL" && -z "$ALERT_WEBHOOK_URL" && "$ALERT_CHANNEL_REQUIRED" == 1 && "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
 v=$(bash -c 'source "$1/lib.sh"; kv_write "$GB_STATE/kv.test" "result=ok" "time=42" "note=a=b"; kv_get "$GB_STATE/kv.test" note; kv_get "$GB_STATE/kv.test" missing; kv_get "$GB_STATE/nofile" x; echo end' _ "$REPO_DIR")
 check "kv_write/kv_get round trip; missing key/file give empty, never fail" test "$v" = "a=b
@@ -687,6 +689,100 @@ GB_CONFIG="$rcl" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "status.sh and doctor.sh show the build failure" all grep -q '!! Drive report: build of latest-backup-report.txt FAILED' "$TMP/status.out" --and-- grep -q '^WARN *drive report: latest-backup-report.txt could not be built' "$TMP/doc.out"
 rm -f "$TMP/state-rc/report-upload.status"
 
+step "doctor.sh: fixed-clock prune, hourly slots, quick chain and skipped backup diagnostics"
+V="$TMP/state-visibility"; mkdir -p "$V" "$TMP/clockbin"
+vc=$(mkcfg visibility "GB_STATE=$V")
+export FIXED_NOW=946902600
+cat > "$TMP/clockbin/date" <<'CLOCK'
+#!/usr/bin/env bash
+if [[ "${1:-}" == +%s ]]; then echo "$FIXED_NOW"; else exec /usr/bin/date "$@"; fi
+CLOCK
+chmod +x "$TMP/clockbin/date"
+hour=$(( FIXED_NOW / 3600 * 3600 ))
+vdoc() { PATH="$TMP/clockbin:$PATH" GB_CONFIG="${1:-$vc}" "$REPO_DIR/doctor.sh" >"$TMP/visibility.out" 2>&1 || true; }
+vstatus() { PATH="$TMP/clockbin:$PATH" GB_CONFIG="$vc" "$REPO_DIR/status.sh" --local >"$TMP/visibility-status.out" 2>&1; }
+vhistory() { local h; for h in {1..24}; do [[ "$h" == "${1:-0}" ]] || echo "$(( hour - h * 3600 + 1020 ))"; done > "$V/hourly-history"; }
+echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"
+echo "$(( FIXED_NOW - 60 ))" > "$V/last-success"
+echo "$FIXED_NOW" > "$V/last-success-quick"
+printf 'result=ok\ntime=%s\npruned=1\nprune_skip=\n' "$FIXED_NOW" > "$V/last-check.result"
+echo "$FIXED_NOW" > "$V/last-check"
+vhistory; vdoc
+check "all 24 completed hours covered -> hourly slots OK" grep -q '^OK *hourly slots: 0 missed of 24 completed hours' "$TMP/visibility.out"
+vhistory 3; vdoc
+missed_hour=$(TZ=UTC date -d "@$(( hour - 3 * 3600 ))" +%H:00)
+check "one hole -> hourly slots WARN naming that clock hour" grep -q "^WARN *hourly slots: 1 missed of 24 completed hours: $missed_hour" "$TMP/visibility.out"
+printf 'time=%s\nmode=auto\nreason=lock-busy\nholder=check.sh\nwaited=1200\n' "$(( hour - 3 * 3600 + 1200 ))" > "$V/backup-skipped"
+vdoc
+check "missed-hour detail names the recorded skip time and holder" grep -q '^WARN *hourly slots: .*backup skipped at .* (held by check.sh)' "$TMP/visibility.out"
+rm -f "$V/backup-skipped"
+vc2=$(mkcfg visibility-two "GB_STATE=$V" 'HOURLY_MISS_WARN=2')
+vdoc "$vc2"
+check "configured miss threshold tolerates one missed slot" grep -q '^OK *hourly slots: 1 missed of 24 completed hours' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-window "GB_STATE=$V" 'HOURLY_SLOT_WINDOW_H=2')
+vdoc "$vc2"
+check "configured two-hour window excludes the older hole" grep -q '^OK *hourly slots: 0 missed of 2 completed hours' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-local "GB_STATE=$V" 'export TZ=Asia/Kolkata')
+for h in {1..24}; do [[ "$h" == 3 ]] || echo "$(( FIXED_NOW - h * 3600 ))"; done > "$V/hourly-history"
+vdoc "$vc2"
+missed_hour=$(TZ=Asia/Kolkata date -d "@$(( FIXED_NOW - 3 * 3600 ))" +%H:00)
+check "slots and labels follow local clock hours in a half-hour time zone" grep -q "^WARN *hourly slots: 1 missed of 24 completed hours: $missed_hour" "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 7200 ))" > "$V/first-start"
+printf '%s\n' "$(( hour - 7200 + 1800 ))" "$(( hour - 3600 + 1800 ))" > "$V/hourly-history"
+vdoc
+check "two-hour-old install with two successes is not blamed for earlier hours" grep -q '^OK *hourly slots: 0 missed' "$TMP/visibility.out"
+rm -f "$V/hourly-history"; vdoc
+check "fresh install with missing history -> OK no history yet" grep -q '^OK *hourly slots: no history yet' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"; vdoc
+check "old install without history -> WARN with state path" grep -q '^WARN *hourly slots: no hourly history (state/hourly-history missing)' "$TMP/visibility.out"
+printf '%s\n1e9999\n' "$FIXED_NOW" > "$V/hourly-history"; vdoc
+check "garbled history -> same warning, no arithmetic failure" all grep -q '^WARN *hourly slots: no hourly history' "$TMP/visibility.out" --and-- not grep -q 'Traceback\|syntax error' "$TMP/visibility.out"
+vhistory 1
+echo "$FIXED_NOW" >> "$V/hourly-history"; vdoc
+check "a success in the current hour never fills a previous hole" grep -q '^WARN *hourly slots: 1 missed' "$TMP/visibility.out"
+vhistory
+echo "$(( FIXED_NOW - 3 * 3600 ))" > "$V/last-success-quick"; vdoc; vstatus
+check "stale quick chain -> WARN in doctor and status" all grep -q '^WARN *quick chain: last complete quick backup 3 h ago' "$TMP/visibility.out" --and-- grep -q '^!! WARNING: last successful quick run is 3h old' "$TMP/visibility-status.out"
+vc2=$(mkcfg visibility-slow-quick "GB_STATE=$V" 'QUICK_EVERY_MIN=90')
+vdoc "$vc2"
+check "three quick intervals extend the quick age threshold" grep -q '^OK *quick chain: complete 3 h ago' "$TMP/visibility.out"
+PATH="$TMP/clockbin:$PATH" GB_CONFIG="$vc2" "$REPO_DIR/status.sh" --local > "$TMP/visibility-status.out" 2>&1
+check "status shares the extended quick threshold" not grep -q '^!! WARNING: last successful quick run' "$TMP/visibility-status.out"
+echo "$FIXED_NOW" > "$V/last-success-quick"; vdoc
+check "fresh quick chain -> OK" grep -q '^OK *quick chain: complete 0 min ago' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-no-quick "GB_STATE=$V" 'QUICK_EVERY_MIN=0')
+vdoc "$vc2"
+check "disabled quick chain -> OK with explicit setting" grep -q '^OK *quick chain: disabled (QUICK_EVERY_MIN=0)' "$TMP/visibility.out"
+rm -f "$V/last-success-quick"; vdoc
+check "no quick success on old install -> WARN none yet" grep -q '^WARN *quick chain: none yet' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 3600 ))" > "$V/first-start"; vdoc
+check "no quick success within two hours of first-start -> OK none yet" grep -q '^OK *quick chain: none yet' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"
+printf 'result=ok\ntime=%s\npruned=0\nprune_skip=last-backup-not-complete\n' "$FIXED_NOW" > "$V/last-check.result"
+echo "$(( FIXED_NOW - 3600 ))" > "$V/prune-skipped-since"; vdoc; vstatus
+check "skipped prune -> WARN with reason and consecutive skip age" grep -q '^WARN *last check: .*prune skipped (last-backup-not-complete); since .* (1 h ago)' "$TMP/visibility.out"
+check "status flags the recorded prune skip reason" grep -q '^!! check: prune skipped (last-backup-not-complete); repository keeps growing' "$TMP/visibility-status.out"
+echo "$(( FIXED_NOW - 4 * 86400 ))" > "$V/prune-skipped-since"; vdoc
+check "four days without prune -> PROBLEM" grep -q '^PROBLEM *last check: .*prune skipped (last-backup-not-complete).*4 d ago' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-prune-limit "GB_STATE=$V" 'PRUNE_SKIP_PROBLEM_DAYS=5')
+vdoc "$vc2"
+check "prune severity follows configured day threshold" grep -q '^WARN *last check: .*prune skipped' "$TMP/visibility.out"
+printf 'result=ok\ntime=1e9999\npruned=garbage\nprune_skip=garbage\n' > "$V/last-check.result"
+echo 999999999999999999999 > "$V/prune-skipped-since"; vdoc
+check "garbled prune state -> unknown, no crash" all grep -q '^OK *last check:' "$TMP/visibility.out" --and-- grep -q '^Overall:' "$TMP/visibility.out" --and-- not grep -q 'syntax error\|Traceback\|value too great' "$TMP/visibility.out"
+printf 'result=ok\ntime=%s\npruned=0\nprune_skip=latch\n' "$FIXED_NOW" > "$V/last-check.result"; vdoc
+check "valid skip with garbled age -> WARN unknown age" grep -q '^WARN *last check: .*prune skipped (latch); since ? (unknown)' "$TMP/visibility.out"
+printf 'result=ok\ntime=%s\npruned=1\nprune_skip=\n' "$FIXED_NOW" > "$V/last-check.result"
+printf 'time=%s\nmode=auto\nreason=lock-busy\nholder=check.sh\nwaited=1200\n' "$FIXED_NOW" > "$V/backup-skipped"
+vdoc; vstatus
+check "pending hourly lock skip -> doctor WARN with retry guidance" grep -q '^WARN *skipped backup: an hourly backup gave up waiting for the lock at .* (held by check.sh); the next hourly will retry' "$TMP/visibility.out"
+check "pending hourly lock skip -> status warning and attention" all grep -q '^!! hourly backup skipped at .* (held by check.sh)' "$TMP/visibility-status.out" --and-- grep -q '^Overall: ATTENTION NEEDED' "$TMP/visibility-status.out"
+echo "$(( FIXED_NOW + 1 ))" > "$V/last-success"; vdoc; vstatus
+check "newer success clears doctor skip warning" all grep -q '^OK *skipped backup: none pending' "$TMP/visibility.out" --and-- not grep -q '^WARN *skipped backup:' "$TMP/visibility.out"
+check "newer success clears status skip warning" not grep -q '^!! hourly backup skipped' "$TMP/visibility-status.out"
+printf 'time=1e9999\nholder=check.sh\n' > "$V/backup-skipped"; vdoc; vstatus
+check "garbled skip epoch is ignored by both diagnostics" all grep -q '^OK *skipped backup: none pending' "$TMP/visibility.out" --and-- not grep -q '^!! hourly backup skipped' "$TMP/visibility-status.out"
+
 step "doctor.sh: PROBLEM / WARN / OK, exit codes, --json, status.sh --doctor, lock ownership, garbled state"
 D="$TMP/state-doc"; mkdir -p "$D"; dc=$(mkcfg doc "GB_STATE=$D")
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
@@ -699,10 +795,20 @@ check "status.sh --doctor delegates (same JSON shape and exit code)" all test "$
 # healthy: scheduler lock held by a live process, fresh heartbeat, fresh backup/check/test restore/quota sample
 ( exec 7>>"$D/scheduler.lock"; flock 7; exec sleep 120 ) & SP=$!; sleep 1
 now_s > "$D/scheduler.heartbeat"; now_s > "$D/last-success"; now_s > "$D/last-check"; now_s > "$D/last-test-restore"
+now_s > "$D/last-success-quick"
+for h in {1..24}; do echo "$(( $(now_s) / 3600 * 3600 - h * 3600 + 1200 ))"; done > "$D/hourly-history"
 printf 'drive_pct=20\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "healthy state: exit 0, Overall: OK, no WARN/PROBLEM lines" all test "$rc" = 0 --and-- grep -q '^Overall: OK' "$TMP/doc.out" --and-- not grep -qE '^(WARN|PROBLEM)' "$TMP/doc.out"
 check "no-channel warning explicitly disabled: doctor says disabled on purpose" grep -q '^OK *alert channel: disabled on purpose' "$TMP/doc.out"
+echo "$(( $(now_s) - 60 ))" > "$D/last-success"
+printf 'time=%s\nholder=check.sh\n' "$(now_s)" > "$D/backup-skipped"
+GB_CONFIG="$dc" "$REPO_DIR/status.sh" --local > "$TMP/skip-status.out" 2>&1
+check "a pending skip alone makes otherwise healthy status need attention" all grep -q '^!! hourly backup skipped at .*held by check.sh' "$TMP/skip-status.out" --and-- grep -qx 'Overall: ATTENTION NEEDED' "$TMP/skip-status.out"
+echo "$(( $(now_s) + 1 ))" > "$D/last-success"
+GB_CONFIG="$dc" "$REPO_DIR/status.sh" --local > "$TMP/skip-status.out" 2>&1
+check "a newer success restores healthy status despite the older skip file" all not grep -q '^!! hourly backup skipped' "$TMP/skip-status.out" --and-- grep -qx 'Overall: OK' "$TMP/skip-status.out"
+rm -f "$D/backup-skipped"; now_s > "$D/last-success"
 dcwarn=$(mkcfg doc-no-channel "GB_STATE=$D" 'ALERT_CHANNEL_REQUIRED=1')
 rc=0; GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" >"$TMP/channel-doc.out" 2>&1 || rc=$?
 check "no channel configured: doctor exit 1 and loud WARN with guidance" all test "$rc" = 1 --and-- grep -q '^WARN *alert channel: NO ALERT CHANNEL:.*nobody is told.*run ./test-alert.sh' "$TMP/channel-doc.out"
@@ -816,7 +922,7 @@ GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "CHECK_FAILED latch: PROBLEM last check" grep -q '^PROBLEM *last check: restic check FAILED (latch' "$TMP/doc.out"
 rm -f "$D/CHECK_FAILED"; printf 'result=ok\ntime=%s\npruned=0\n' "$(( $(now_s) - 7200 ))" > "$D/last-check.result"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
-check "last-check.result ok, pruned=0: OK with 'prune skipped'" grep -q '^OK *last check: ok 2 h ago, prune skipped' "$TMP/doc.out"
+check "legacy last-check.result ok, pruned=0: WARN with unknown skip reason and age" grep -q '^WARN *last check: ok 2 h ago, prune skipped (unknown); since ? (unknown)' "$TMP/doc.out"
 printf 'result=failed\ntime=%s\nfiles=3\nmismatches=1\n' "$(now_s)" > "$D/test-restore.result"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "test-restore.result failed: PROBLEM" grep -q '^PROBLEM *test restore: FAILED .*1 mismatches' "$TMP/doc.out"

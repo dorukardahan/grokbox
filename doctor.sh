@@ -90,14 +90,85 @@ elif isnum "$first" && (( now - first >= ${FIRST_SUCCESS_GRACE_HOURS:-2} * 3600 
   row PROBLEM "last backup" "no complete hourly backup yet, $(( (now - first) / 3600 )) h after the first start; run ./backup.sh and read its output"
 else row WARN "last backup" "none yet (just installed; the first hourly run or ./backup.sh creates it)"; fi
 
+# --- hourly slots: completed local clock hours only; the partial install hour is excused.
+window=$(num_ok "$HOURLY_SLOT_WINDOW_H"); window=${window:-24}
+miss_warn=$(num_ok "$HOURLY_MISS_WARN"); miss_warn=${miss_warn:-1}
+skipped_backup || true
+mapfile -t slots < <(python3 - "$GB_STATE/hourly-history" "$now" "$window" "$miss_warn" "${first:-0}" "${SKIP_TIME:-0}" "$SKIP_HOLDER" <<'PY'
+import re, sys, time
+path, now, window, warn, first, skip, holder = sys.argv[1:]
+now, window, warn, first, skip = map(int, (now, window, warn, first, skip))
+history = []
+try:
+    for line in open(path):
+        value = line.strip()
+        if not re.fullmatch(r'[0-9]{1,10}', value) or not 0 < int(value) < 8589934592:
+            raise ValueError('invalid epoch')
+        history.append(int(value))
+except (OSError, ValueError, UnicodeError):
+    history = []
+if not history:
+    fresh = first > 0 and now - first < 86400
+    print('OK' if fresh else 'WARN')
+    print('no history yet' if fresh else 'no hourly history (state/hourly-history missing)')
+else:
+    clock = time.localtime(now)
+    end = now - clock.tm_min * 60 - clock.tm_sec
+    start = max(end - window * 3600, first, 0)
+    # Bound work even if a window is configured larger than the retained history.
+    covered = {end + (t - end) // 3600 * 3600 for t in history if t < end}
+    count = max(0, (end - start) // 3600)
+    missed = count - sum(end - count * 3600 <= t < end for t in covered)
+    hours = []
+    for i in range(min(count, len(covered) + 6)):
+        hour = end - (count - i) * 3600
+        if hour not in covered:
+            hours.append(time.strftime('%H:00', time.localtime(hour)))
+            if len(hours) == 6:
+                break
+    detail = f'{missed} missed of {count} completed hours'
+    if missed:
+        detail += ': ' + ', '.join(hours) + (' ...' if missed > 6 else '')
+        skip_hour = end + (skip - end) // 3600 * 3600
+        if skip > 0 and end - count * 3600 <= skip_hour < end and skip_hour not in covered:
+            detail += f'; backup skipped at {time.strftime("%F %H:%M", time.localtime(skip))} (held by {holder})'
+    print('WARN' if missed >= warn else 'OK')
+    print(detail)
+PY
+)
+row "${slots[0]:-WARN}" "hourly slots" "${slots[1]:-unknown}"
+
+# --- quick chain and the most recent hourly lock skip
+quick=$(epochf "$GB_STATE/last-success-quick"); quick_limit=$(quick_max_age_s)
+if [[ "$QUICK_EVERY_MIN" == 0 ]]; then row OK "quick chain" "disabled (QUICK_EVERY_MIN=0)"
+elif isnum "$quick"; then
+  if (( now - quick >= quick_limit )); then row WARN "quick chain" "last complete quick backup $(ago "$quick") (limit $(( quick_limit / 60 )) min)"
+  else row OK "quick chain" "complete $(ago "$quick")"; fi
+elif isnum "$first" && (( now - first < 7200 )); then row OK "quick chain" "none yet (first-start grace)"
+else row WARN "quick chain" "none yet (first start $(ago "$first"))"; fi
+if skipped_backup; then
+  row WARN "skipped backup" "an hourly backup gave up waiting for the lock at $(at "$SKIP_TIME") (held by $SKIP_HOLDER); the next hourly will retry"
+else row OK "skipped backup" "none pending"; fi
+
 # --- last check (last-check.result from check.sh if present, else state/last-check)
 lc="$GB_STATE/last-check.result"
-cres=$(kv_get "$lc" result); ct=$(kv_epoch "$lc" time); cpr=$(kv_get "$lc" pruned)
+cres=$(kv_get "$lc" result); ct=$(kv_epoch "$lc" time); cpr=$(kv_get "$lc" pruned); cskip=$(kv_get "$lc" prune_skip)
+[[ "$cskip" =~ ^(latch|last-backup-not-complete|check-failed)$ ]] || cskip=""
 [[ "$cres" =~ ^(ok|failed|skipped)$ ]] || cres=""
 isnum "$ct" || ct=$(epochf "$GB_STATE/last-check")
 pr=""; case "$cpr" in 1) pr=", pruned";; 0) pr=", prune skipped";; esac
-if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then row PROBLEM "last check" "restic check FAILED (latch state/CHECK_FAILED; prune blocked until a check passes): see the log, docs/runbooks if present, then ./check.sh"
-elif [[ "$cres" == failed ]]; then row PROBLEM "last check" "FAILED at $(at "$ct"); see logs/backup-$(date +%Y-%m).log"
+if [[ "$cpr" == 0 || -n "$cskip" ]]; then
+  since=$(epochf "$GB_STATE/prune-skipped-since")
+  days=$(num_ok "$PRUNE_SKIP_PROBLEM_DAYS"); days=${days:-3}
+  # Compare days rather than multiplying a configurable value by seconds.
+  severity=WARN
+  if isnum "$since" && (( (now - since) / 86400 >= days )); then severity=PROBLEM; fi
+  pr=", prune skipped (${cskip:-unknown}); since $(at "$since") ($(ago "$since"))"
+fi
+if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then row PROBLEM "last check" "restic check FAILED (latch state/CHECK_FAILED; prune blocked until a check passes)$pr: see the log, docs/runbooks if present, then ./check.sh"
+elif [[ "$cres" == failed ]]; then row PROBLEM "last check" "FAILED at $(at "$ct")$pr; see logs/backup-$(date +%Y-%m).log"
+elif [[ "$cpr" == 0 || -n "$cskip" ]]; then
+  row "$severity" "last check" "${cres:-unknown} $(ago "$ct")$pr"
 elif isnum "$ct"; then
   if (( now - ct >= 48 * 3600 )); then row WARN "last check" "$(ago "$ct") (expected daily at ${DAILY_CHECK_AT:-04:40}); is the scheduler running?"
   else row OK "last check" "${cres:-ok} $(ago "$ct")$pr"; fi

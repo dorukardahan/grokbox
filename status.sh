@@ -34,13 +34,22 @@ echo "Last hourly snapshot:   $(ts "$GB_STATE/last-success")"
 echo "Last quick snapshot:    $(ts "$GB_STATE/last-success-quick")   (every ${QUICK_EVERY_MIN} min)"
 echo "Last check:             $(ts "$GB_STATE/last-check")"
 echo "Last test restore OK:   $(ts "$GB_STATE/last-test-restore")$( [[ -s $GB_STATE/test-restore-result.txt ]] && echo "   result: $(sed -n 2p "$GB_STATE/test-restore-result.txt")")"
-for k in last-success:hourly:$ALERT_NO_SUCCESS_HOURS last-success-quick:quick:2; do
+quick_limit=$(quick_max_age_s)
+for k in last-success:hourly:$(( ALERT_NO_SUCCESS_HOURS * 3600 )) last-success-quick:quick:$quick_limit; do
   f=${k%%:*}; r=${k#*:}; lbl=${r%%:*}; lim=${r#*:}
   [[ "$f" == last-success-quick && "$QUICK_EVERY_MIN" == 0 ]] && continue
   [[ -s "$GB_STATE/$f" ]] || continue
-  age_h=$(( ( $(date +%s) - $(cat "$GB_STATE/$f") ) / 3600 ))
-  (( age_h >= lim )) && { problems=1; echo "!! WARNING: last successful $lbl run is ${age_h}h old"; }
+  stamp=$(epoch_file "$GB_STATE/$f"); [[ -n "$stamp" ]] || continue
+  age_s=$(( $(date +%s) - stamp ))
+  (( age_s >= lim )) && { problems=1; echo "!! WARNING: last successful $lbl run is $(( age_s / 3600 ))h old"; }
 done
+if skipped_backup; then
+  problems=1; echo "!! hourly backup skipped at $(date -d "@$SKIP_TIME" '+%F %H:%M %Z') (held by $SKIP_HOLDER); the next hourly will retry"
+fi
+prune_skip=$(kv_get "$GB_STATE/last-check.result" prune_skip)
+if [[ "$prune_skip" =~ ^(latch|last-backup-not-complete|check-failed)$ ]]; then
+  problems=1; echo "!! check: prune skipped ($prune_skip); repository keeps growing until a complete hourly backup"
+fi
 now=$(date +%s); first=$(cat "$GB_STATE/first-start" 2>/dev/null || echo "")
 if [[ ! -s "$GB_STATE/last-success" ]]; then
   if [[ -n "$first" ]] && (( now - first >= ${FIRST_SUCCESS_GRACE_HOURS:-2} * 3600 )); then

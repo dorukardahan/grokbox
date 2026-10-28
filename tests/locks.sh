@@ -160,10 +160,25 @@ chmod +x "$TMP/bin/"*
 run_backup() { local rc=0; "$REPO_DIR/backup.sh" --no-forget > "$TMP/backup.out" 2>&1 || rc=$?; [[ "$rc" == "$1" ]]; }
 check 'complete backup writes atomic result' run_backup 0
 check 'complete metrics recorded' grep -qx 'bytes=42' "$TMP/state/last-backup.result"
+check 'complete hourly success records its epoch in history' python3 - "$TMP/state" <<'PYHISTORY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1])
+assert (p/'hourly-history').read_text().splitlines()==[(p/'last-success').read_text().strip()]
+PYHISTORY
 check 'normal backup lists snapshots exactly twice' python3 - "$TMP/args" <<'PYLISTS'
 import sys
 assert sum(line.startswith('snapshots ') for line in open(sys.argv[1])) == 2
 PYLISTS
+seq 946684800 946685204 > "$TMP/state/hourly-history"
+check 'hourly success with a long history succeeds' run_backup 0
+check 'hourly history retains the newest 400 epochs including this success' python3 - "$TMP/state" <<'PYHISTORY'
+import pathlib,sys
+p=pathlib.Path(sys.argv[1]); lines=(p/'hourly-history').read_text().splitlines()
+assert len(lines)==400 and lines[0]=='946684806'
+assert lines[-1]==(p/'last-success').read_text().strip()
+assert not (p/'hourly-history.tmp').exists()
+PYHISTORY
+cp "$TMP/state/hourly-history" "$TMP/history-before-failure"
 for rc in 124 137; do
   export FAKE_RC=$rc
   check "timeout $rc returned" run_backup "$rc"
@@ -171,6 +186,7 @@ for rc in 124 137; do
     check 'early SIGKILL wording does not claim timeout grace' grep -q 'killed before the timeout elapsed' "$TMP/backup.out"
   fi
   check "timeout $rc recorded" grep -qx 'result=timeout' "$TMP/state/last-backup.result"
+  check "timeout $rc never adds an hourly success" cmp -s "$TMP/history-before-failure" "$TMP/state/hourly-history"
   : > "$TMP/calls"
   "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
   check "timeout $rc blocks prune" not grep -qx prune "$TMP/calls"
@@ -178,6 +194,37 @@ done
 export FAKE_RC=3 FAKE_KIND=unknown
 check 'unknown exit 3 remains incomplete' run_backup 6
 check 'incomplete backup result' grep -qx 'result=incomplete' "$TMP/state/last-backup.result"
+# An incomplete latest hourly must make skipped maintenance visible, once per incident.
+rm -f "$TMP/state/ALERT" "$TMP/state/alert-seen" "$TMP/state/prune-skipped-since"
+for _ in 1 2; do
+  : > "$TMP/calls"
+  "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
+  if [[ ! -f "$TMP/first-prune-skip" ]]; then cp "$TMP/state/prune-skipped-since" "$TMP/first-prune-skip"; fi
+done
+check 'incomplete hourly skips prune and records the reason' python3 - "$TMP" <<'PYPRUNE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); d=dict(line.split('=',1) for line in (p/'state/last-check.result').read_text().splitlines())
+assert 'prune' not in (p/'calls').read_text().splitlines()
+assert d['pruned']=='0' and d['prune_skip']=='last-backup-not-complete'
+PYPRUNE
+check 'consecutive prune skips preserve the first epoch' python3 - "$TMP" <<'PYPRUNE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1]); value=(p/'state/prune-skipped-since').read_text()
+assert value.strip().isdigit() and value==(p/'first-prune-skip').read_text()
+PYPRUNE
+check 'incomplete hourly prune alert is raised once' test "$(grep -Fc 'check: prune skipped (last-backup-not-complete); repository keeps growing until a complete hourly backup' "$TMP/state/ALERT")" = 1
+sed -i 's/^result=incomplete$/result=complete/' "$TMP/state/last-backup.result"
+: > "$TMP/calls"; "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
+check 'next check after a complete hourly prunes and clears skip state' python3 - "$TMP" <<'PYPRUNE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1])
+assert 'prune' in (p/'calls').read_text().splitlines()
+assert 'prune_skip=\n' in (p/'state/last-check.result').read_text()
+assert not (p/'state/prune-skipped-since').exists()
+PYPRUNE
 export FAKE_KIND=permission
 check 'first unreadable omission is incomplete' run_backup 6
 rm -f "$TMP/state/ALERT"
@@ -202,15 +249,42 @@ export FAKE_CHECK_RC=1
 : > "$TMP/calls"; rc=0; "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1 || rc=$?
 check 'failed check returns 5 and latches' test "$rc" = 5 -a -f "$TMP/state/CHECK_FAILED"
 check 'failed check never prunes' not grep -qx prune "$TMP/calls"
+check 'failed check records the prune skip and its first epoch' python3 - "$TMP/state" <<'PYPRUNE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1])
+assert 'prune_skip=check-failed' in (p/'last-check.result').read_text()
+assert (p/'prune-skipped-since').read_text().strip().isdigit()
+PYPRUNE
 export FAKE_CHECK_RC=0
 : > "$TMP/calls"; "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
 check 'failed-check latch blocks forget on following run' not grep -qx forget "$TMP/calls"
 check 'passing check clears latch' test ! -e "$TMP/state/CHECK_FAILED"
 check 'passing check permits prune' grep -qx 'pruned=1' "$TMP/state/last-check.result"
+check 'successful prune clears skip reason and consecutive age' python3 - "$TMP/state" <<'PYPRUNE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1])
+assert 'prune_skip=\n' in (p/'last-check.result').read_text()
+assert not (p/'prune-skipped-since').exists()
+PYPRUNE
 check 'check precedes prune' python3 -c 'import sys;x=open(sys.argv[1]).read().splitlines();assert x.index("check")<x.index("prune")' "$TMP/calls"
 echo garbage > "$TMP/state/last-backup.result"
 : > "$TMP/calls"; "$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
 check 'garbled backup result blocks prune' not grep -qx prune "$TMP/calls"
+# A latch uses its existing alert rather than a second incomplete-hourly alert.
+rm -f "$TMP/state/ALERT" "$TMP/state/alert-seen"
+echo 946684800 > "$TMP/state/SQLITE_FAILED"
+"$REPO_DIR/check.sh" > "$TMP/check.out" 2>&1
+check 'latched prune skip records latch reason without a second alert' python3 - "$TMP/state" <<'PYPRUNE'
+from pathlib import Path
+import sys
+p=Path(sys.argv[1])
+assert 'prune_skip=latch' in (p/'last-check.result').read_text()
+alerts=(p/'ALERT').read_text()
+assert 'forget/prune SKIPPED' in alerts and 'check: prune skipped (' not in alerts
+PYPRUNE
+rm -f "$TMP/state/SQLITE_FAILED"
 
 # Remote bookkeeping failures must not discard a successful backup or daily check.
 export FAKE_RC=0

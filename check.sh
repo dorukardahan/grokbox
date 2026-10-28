@@ -13,9 +13,14 @@ fi
 exec 9>"$GB_STATE/backup.lock"
 flock -w "${LOCK_WAIT:-3600}" 9 || { log "check: backup lock busy; not run now (scheduler retries)"; exit 75; }
 took_lock check
-CHECK_RESULT=failed; PRUNED=0
+CHECK_RESULT=failed; PRUNED=0; PRUNE_SKIP=check-failed
 write_check_result() {
-  printf 'result=%s\ntime=%s\npruned=%s\n' "$CHECK_RESULT" "$(date +%s)" "$PRUNED" > "$GB_STATE/last-check.result.tmp"
+  if [[ $PRUNED == 1 ]]; then
+    PRUNE_SKIP=""; rm -f "$GB_STATE/prune-skipped-since"
+  elif [[ -z "$(epoch_file "$GB_STATE/prune-skipped-since")" ]]; then
+    date +%s > "$GB_STATE/prune-skipped-since"
+  fi
+  printf 'result=%s\ntime=%s\npruned=%s\nprune_skip=%s\n' "$CHECK_RESULT" "$(date +%s)" "$PRUNED" "$PRUNE_SKIP" > "$GB_STATE/last-check.result.tmp"
   mv "$GB_STATE/last-check.result.tmp" "$GB_STATE/last-check.result"
 }
 trap write_check_result EXIT
@@ -44,10 +49,14 @@ else
 fi
 last_result=$(backup_result_status)
 if [[ -e "$GUARD_LATCH" || -e "$SQLITE_LATCH" || -e "$GB_STATE/CHECK_FAILED" ]]; then
+  PRUNE_SKIP=latch
   log "prune skipped: safety latch set"
 elif [[ "$last_result" != complete ]]; then
+  PRUNE_SKIP=last-backup-not-complete
   log "prune skipped: last hourly backup incomplete, interrupted, failed or unknown; uploaded packs retained until a complete backup"
+  alert "check: prune skipped ($PRUNE_SKIP); repository keeps growing until a complete hourly backup"
 else
+  PRUNE_SKIP=""
   if R_TIMEOUT="$RESTIC_TIMEOUT_CHECK" RT prune >>"$LOG" 2>&1; then PRUNED=1
   else alert "prune failed or timed out (see $LOG)"; fi
 fi

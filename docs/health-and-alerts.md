@@ -16,6 +16,17 @@ long), last complete backup, last check (and the `CHECK_FAILED` latch), Drive au
 `rclone.conf`; `--online` tests it), quota/disk (`state/quota.status`), last test restore, Drive report
 upload, expected bots. Ends with `Overall: OK | WARN | PROBLEM`.
 
+| doctor row | what it shows |
+|---|---|
+| hourly slots | Missed completed local clock hours in `HOURLY_SLOT_WINDOW_H` (default 24), capped by first start; WARN at `HOURLY_MISS_WARN` (default 1), naming up to six hours. Complete hourly successes keep the latest 400 entries in `state/hourly-history`. |
+| quick chain | WARN after the greater of two hours or three quick intervals without a success; disabled when `QUICK_EVERY_MIN=0`. The first quick backup has two hours of grace. |
+| skipped backup | WARN when an hourly run gave up waiting for the lock after the last success; shows the time and holder. The next hourly run retries. |
+
+The last check row warns with the prune skip reason and its age, becoming PROBLEM after
+`PRUNE_SKIP_PROBLEM_DAYS` (default 3) consecutive days. A successful prune clears that age.
+An incomplete last hourly backup raises one deduped prune-skip alert; safety latches keep their existing alerts.
+`status.sh` also flags pending hourly skips and recorded prune skip reasons.
+
 Exit code: `0` all OK, `1` at least one WARN and no PROBLEM, `2` at least one PROBLEM. Rule of thumb:
 PROBLEM = a human must act now (scheduler dead or hung, no complete backup for `ALERT_NO_SUCCESS_HOURS`,
 failed check or test restore, missing credentials, 90 %+ full, open alerts); WARN = degraded but

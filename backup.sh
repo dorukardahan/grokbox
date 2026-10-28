@@ -270,6 +270,9 @@ fi
 date +%s > "$GB_STATE/last-success-$MODE"
 if [[ $MODE == auto ]]; then
   cp "$cur" "$GB_STATE/manifest-last-good.json"; date +%s > "$GB_STATE/last-success"
+  # backup.lock serializes writers; readers see only the complete, bounded history.
+  { [[ ! -f "$GB_STATE/hourly-history" ]] || cat "$GB_STATE/hourly-history"; cat "$GB_STATE/last-success"; } | tail -n 400 > "$GB_STATE/hourly-history.tmp"
+  mv "$GB_STATE/hourly-history.tmp" "$GB_STATE/hourly-history"
   rm -f "$GUARD_LATCH" "$GB_STATE/last-partial" "$GB_STATE/backup-skipped"   # only a good hourly backup clears the latch
   [[ -z "$NO_FORGET_WHY" ]] && rm -f "$SQLITE_LATCH"   # ...and the SQLite latch needs a fully clean hourly
 fi
