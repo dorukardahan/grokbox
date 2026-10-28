@@ -9,22 +9,23 @@
 #                              1 = some missing / not readable / stale / incomplete, 2 = no export yet
 #   expected-bots.sh --alert   same, and raise an alert (deduped: once per incident) when bots are missing, or
 #                              when there is still no export EXPECTED_BOTS_MAX_HOURS after the first start
+#   expected-bots.sh --suggest  print an active-bot roster to review and paste into config.env
 # Deleted ids (DELETED_BOTS_FILE) and RETIRED_BOTS names/ids are exempt; retained history is reported.
 # AGENTS_DIR profiles detect same-name replacements that have never been exported.
 # scheduler.sh runs it with --alert after every hourly backup; doctor.sh shows the line.
 source "$(dirname "$0")/lib.sh"; set +e; trap - ERR
-ALERT=0
-for a in "$@"; do case "$a" in --alert) ALERT=1;; -h|--help) sed -n 2,14p "$0"; exit 0;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
-if (( ${#EXPECTED_BOTS[@]} == 0 )); then echo "no roster configured (EXPECTED_BOTS is empty)"; exit 0; fi
+ALERT=0; SUGGEST=0
+for a in "$@"; do case "$a" in --alert) ALERT=1;; --suggest) SUGGEST=1;; -h|--help) sed -n 2,15p "$0"; exit 0;; *) echo "unknown arg $a" >&2; exit 2;; esac; done
+if (( ${#EXPECTED_BOTS[@]} == 0 && SUGGEST == 0 )); then echo "no roster configured (EXPECTED_BOTS is empty)"; exit 0; fi
 POS="${SERVER_EXPORT_DIR:-$GB_DIR/staging/server-export}/state/positions.json"
 MAX_H="${EXPECTED_BOTS_MAX_HOURS:-26}"
 # prints 2 lines: the status line (with ages) and a stable alert summary (no ages/counts that grow by the hour)
-out=$(python3 - "$POS" "$MAX_H" "${EXPECTED_BOTS_GRACE_MIN:-60}" "$DELETED_BOTS_FILE" "$AGENTS_DIR" "${#RETIRED_BOTS[@]}" "${RETIRED_BOTS[@]}" "${EXPECTED_BOTS[@]}" <<'PY'
+out=$(python3 - "$POS" "$MAX_H" "${EXPECTED_BOTS_GRACE_MIN:-60}" "$DELETED_BOTS_FILE" "$AGENTS_DIR" "$SUGGEST" "${#RETIRED_BOTS[@]}" "${RETIRED_BOTS[@]}" "${EXPECTED_BOTS[@]}" <<'PY'
 import json, os, re, sys, time, unicodedata
 from datetime import datetime
 pos_file, max_h, grace_min = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
-deleted_file, agents_dir, retired_n = sys.argv[4], sys.argv[5], int(sys.argv[6])
-retired, want = sys.argv[7:7 + retired_n], sys.argv[7 + retired_n:]
+deleted_file, agents_dir, suggest, retired_n = sys.argv[4], sys.argv[5], sys.argv[6] == "1", int(sys.argv[7])
+retired, want = sys.argv[8:8 + retired_n], sys.argv[8 + retired_n:]
 # Keep tolerant parsing identical to server-export-merge.py: deleted_ids().
 deleted_ids = set()
 try:
@@ -55,6 +56,21 @@ def matches(a, b):
 def is_deleted(e, tid, rec):
     names = [e, tid] + ([rec.get("name")] if rec else [])
     return tid in deleted_ids or any(matches(n, r) for n in names for r in retired)
+if suggest:
+    if not pos:
+        print("no server-side export yet"); sys.exit(2)
+    names = []
+    for tid, rec in pos.items():
+        if not isinstance(rec, dict) or rec.get("unreadable") is True or rec.get("deleted") is True: continue
+        name = rec.get("name") if isinstance(rec.get("name"), str) else ""
+        if tid in deleted_ids or any(matches(n, r) for n in (tid, name) for r in retired): continue
+        names.append(name or tid)
+    print("EXPECTED_BOTS=(" if names else "EXPECTED_BOTS=()")
+    for name in sorted(names):
+        print("  '" + name.replace("'", "'\"'\"'") + "'")
+    if names: print(")")
+    print("# paste into config.env; review the list")
+    sys.exit(0)
 # An unavailable inventory is optional; invalid profiles still leave an id-only entry.
 inventory = {}
 try:
@@ -135,6 +151,7 @@ age = f" (newest check {newest:.0f} h ago)" if newest is not None else ""
 print(f"all {active} expected bots present and complete in the server-side export{age}{suffix}\n-")
 PY
 ); rc=$?
+if (( SUGGEST == 1 )); then echo "$out"; exit "$rc"; fi
 echo "${out%%$'\n'*}"
 if (( rc == 1 && ALERT == 1 )); then alert "expected bots ${out#*$'\n'} (EXPECTED_BOTS in config.env; see docs/health-and-alerts.md)"; fi
 if (( rc == 2 )); then

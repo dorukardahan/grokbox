@@ -131,6 +131,11 @@ is one alert until `status.sh --ack`. "No export yet" is shown without an alert 
 grace: once the first start (`state/first-start`) is older than `EXPECTED_BOTS_MAX_HOURS` and there is
 still no export at all, a nonempty roster raises one alert (the bots' parent chats create the transcript export).
 
+Run `./expected-bots.sh --suggest` to print a safely quoted roster of active exported bots.
+Review the list and paste it into local `config.env`; it cannot include bots never exported yet.
+Doctor warns when active exports exist but `EXPECTED_BOTS` is empty; `EXPECTED_BOTS_REQUIRED=0`
+silences this warning. With no server-side export, an empty roster is OK.
+
 Deleted bots may stay in `EXPECTED_BOTS`: ids in `DELETED_BOTS_FILE` (default
 `/home/box/agent-data/deleted-agents.json`) and names or ids in `RETIRED_BOTS=()` are exempt from
 missing/stale alerts. Retired names match case-insensitively or by slug. The status shows
@@ -149,13 +154,18 @@ replacement is missing (“never exported”); the deleted predecessor’s histo
 Missing/unreadable inventories and missing/invalid profiles are silently tolerated.
 Only active bots count toward export checks; an entirely deleted roster is OK even before any export.
 
-`export-freshness.sh` adds a separate **daily-export-missed** alert when no active per-bot check
-is newer than `EXPORT_MISSED_HOURS` (default 26; 0 disables). It ignores deleted/retired and
-unreadable bots. The scheduler runs it with `--alert` immediately after `expected-bots.sh`;
-`doctor.sh` shows a "daily export" row. Missing/empty state gets the same first-start grace,
-using this threshold; garbled state warns immediately. Alert text stays stable as ages grow.
-Both alerts can fire: freshness checks that any export happened, while the roster checks each bot.
+`export-freshness.sh` alerts when any active bot's check is older than `EXPORT_MISSED_HOURS`
+(default 26; 0 disables), including unknown times. Deleted, retired and unreadable bots are ignored.
+The scheduler runs it with `--alert` after the roster check; doctor's "daily export" row lists the
+oldest stale bots. Missing/empty state keeps first-start grace; garbled state warns immediately.
+Alerts name up to five stale bots alphabetically, without changing ages, so repeats dedupe.
+The roster also detects missing bots and incomplete exports; both alerts can fire.
 Scheduled routines cannot pull transcripts: run the parent chat loop in [routine-main.md](routine-main.md).
+
+`./export-freshness.sh --warnings` lists active bots with warnings recorded in `positions.json`.
+Doctor shows an "export warnings" row after "daily export": WARN for warnings, OK otherwise
+(including no export yet). This check ignores deleted, retired and unreadable bots and sends no alerts.
+Read `staging/server-export/INDEX.md` for the details; disabling freshness does not hide warnings.
 
 ## 5. Drive report (`report.sh`, `latest-backup-report.txt`)
 After every hourly backup, daily check and test restore, `scheduler.sh` runs `report.sh`. It writes

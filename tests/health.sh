@@ -114,7 +114,8 @@ nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$T
 
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
 run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
-old=$(mkcfg old 'unset PRUNE_SKIP_PROBLEM_DAYS HOURLY_MISS_WARN HOURLY_SLOT_WINDOW_H ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+old=$(mkcfg old 'unset PRUNE_SKIP_PROBLEM_DAYS HOURLY_MISS_WARN HOURLY_SLOT_WINDOW_H ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_REQUIRED EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "older config defaults to requiring an expected-bot roster" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$EXPECTED_BOTS_REQUIRED" == 1 ]]' _ "$REPO_DIR"
 run_ok "older config gets prune and hourly visibility defaults" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$PRUNE_SKIP_PROBLEM_DAYS" == 3 && "$HOURLY_MISS_WARN" == 1 && "$HOURLY_SLOT_WINDOW_H" == 24 ]]' _ "$REPO_DIR"
 run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ -z "$ALERT_NTFY_URL" && -z "$ALERT_WEBHOOK_URL" && "$ALERT_CHANNEL_REQUIRED" == 1 && "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
 v=$(bash -c 'source "$1/lib.sh"; kv_write "$GB_STATE/kv.test" "result=ok" "time=42" "note=a=b"; kv_get "$GB_STATE/kv.test" note; kv_get "$GB_STATE/kv.test" missing; kv_get "$GB_STATE/nofile" x; echo end' _ "$REPO_DIR")
@@ -495,8 +496,8 @@ efpos() {  # efpos AGE_A AGE_B [unreadable]: ages in hours
   python3 - "$EF/state/positions.json" "$@" <<'PYFIX'
 import json, sys, time
 stamp = lambda h: time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(time.time() - float(h)*3600))
-json.dump({"bot-a": {"name": "MainBot", "checked": stamp(sys.argv[2])},
-           "bot-b": {"name": "Helper Bot", "checked": stamp(sys.argv[3]), "unreadable": len(sys.argv) > 4}},
+json.dump({"abcdef01": {"name": "bot-a", "checked": stamp(sys.argv[2])},
+           "abcdef02": {"name": "bot-b", "checked": stamp(sys.argv[3]), "unreadable": len(sys.argv) > 4}},
           open(sys.argv[1], "w"))
 PYFIX
 }
@@ -505,26 +506,39 @@ efcheck() {  # efcheck EXPECTED_RC TEXT [flags]
   rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/export-freshness.sh" "$@") || rc=$?
   checkx "daily export: exit $want, $needle" 'test "$rc" = "$want" && [[ "$out" == *"$needle"* ]]'
 }
-efpos 2 40
-efcheck 0 'daily export OK (newest per-bot export check 2 h ago)'
+efpos 1 40
+efcheck 1 'daily export missed: 1 of 2 active bots were not exported in the last 26 h (oldest: bot-b 40 h)'
+checkx "mixed ages: only the stale bot is named" '[[ "$out" != *bot-a* ]]'
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+efcheck 1 'daily export missed' --alert
+check "mixed ages: stable alert names the stale bot, no age" grep -qF 'daily export missed: 1 of 2 active bots not exported within EXPORT_MISSED_HOURS=26 h: bot-b' "$TMP/state/ALERT"
+efpos 2 41
+efcheck 1 'daily export missed' --alert
+check "mixed ages: still one alert as ages grow" all test "$(nalerts 'daily export missed')" = 1 --and-- not grep -qE 'oldest|40 h|41 h|bot-a' "$TMP/state/ALERT"
+efpos 1 2
+efcheck 0 'daily export OK (all 2 active bots checked within 26 h, oldest 2 h ago)'
 efpos 40 50
-efcheck 1 'daily export missed: no bot was exported in the last 26 h'
+efcheck 1 'daily export missed: 2 of 2 active bots were not exported in the last 26 h (oldest: bot-b 50 h, bot-a 40 h)'
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 efcheck 1 'daily export missed' --alert
 efpos 41 51
 efcheck 1 'daily export missed' --alert
-check "daily export alert dedupes as ages grow and contains no fixture ids/names" all test "$(nalerts 'daily export missed')" = 1 --and-- not grep -Eq 'bot-a|bot-b|MainBot|Helper Bot|41|51' "$TMP/state/ALERT"
-for shape in '{"agents":{"bot-b":{}}}' '{"bot-b":{}}' '["bot-b"]' '[{"id":"bot-b"}]'; do
+check "daily export alert dedupes as ages grow and sorts names alphabetically" all test "$(nalerts 'daily export missed')" = 1 --and-- grep -qF 'EXPORT_MISSED_HOURS=26 h: bot-a, bot-b' "$TMP/state/ALERT" --and-- not grep -Eq 'oldest|41 h|51 h' "$TMP/state/ALERT"
+for shape in '{"agents":{"abcdef02":{}}}' '{"abcdef02":{}}' '["abcdef02"]' '[{"id":"abcdef02"}]'; do
   echo "$shape" > "$TMP/daily-deleted.json"
   efc=$(mkcfg daily-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json")
   efpos 40 0; efcheck 1 'daily export missed'
+  efpos 1 40; efcheck 0 'all 1 active bots checked within 26 h'
 done
-for retired in 'helper-bot' 'BOT-B'; do
+for retired in 'BOT B' 'ABCDEF02'; do
   efc=$(mkcfg daily-retired "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""' "RETIRED_BOTS=(\"$retired\")")
+  efpos 40 0
   efcheck 1 'daily export missed'
+  efpos 1 40; efcheck 0 'all 1 active bots checked within 26 h'
 done
 efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
 efpos 40 0 unreadable; efcheck 1 'daily export missed'
+efpos 1 40 unreadable; efcheck 0 'all 1 active bots checked within 26 h'
 # Embedded deletion survives a missing/unreadable external deletion list.
 efc=$(mkcfg daily-embedded-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/no-deleted-list")
 efpos 40 0
@@ -532,18 +546,81 @@ python3 - "$EF/state/positions.json" <<'PYFIX'
 import json, sys
 p = sys.argv[1]
 with open(p) as f: pos = json.load(f)
-pos["bot-b"]["deleted"] = True
+pos["abcdef02"]["deleted"] = True
 with open(p, "w") as f: json.dump(pos, f)
 PYFIX
 efcheck 1 'daily export missed'
-echo '{"bot-b":{"deleted":true}}' > "$EF/state/positions.json"
+echo '{"abcdef02":{"deleted":true}}' > "$EF/state/positions.json"
 efcheck 0 'daily export: no active exported bots'
 
-echo '["bot-a"]' > "$TMP/daily-deleted.json"
+echo '["abcdef01"]' > "$TMP/daily-deleted.json"
 efc=$(mkcfg daily-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json")
 efcheck 0 'daily export: no active exported bots'
+efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+echo '{"abcdef01":{"name":"bot-a","checked":"invalid"},"abcdef02":{"name":"bot-b"}}' > "$EF/state/positions.json"
+efcheck 1 'oldest: bot-a unknown age, bot-b unknown age'
+echo '{"abcdef01-extra":{"checked":"invalid"}}' > "$EF/state/positions.json"
+efcheck 1 'oldest: abcdef01 unknown age'
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys, time
+json.dump({f"abcdef{i:02d}": {"name": f"bot-{chr(97+i)}", "checked":
+           time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(time.time() - (40+i)*3600))}
+           for i in range(8)}, open(sys.argv[1], "w"))
+PYFIX
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+efcheck 1 'oldest: bot-h 47 h, bot-g 46 h, bot-f 45 h, bot-e 44 h, bot-d 43 h, ... +3 more)' --alert
+check "many stale bots: alert has exactly five alphabetical names, no ages" all grep -qE 'daily export missed: 8 of 8 active bots not exported within EXPORT_MISSED_HOURS=26 h: bot-a, bot-b, bot-c, bot-d, bot-e$' "$TMP/state/ALERT" --and-- not grep -qE 'bot-f|bot-g|bot-h|oldest|more' "$TMP/state/ALERT"
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+for name in bot-1 bot-2; do
+  printf '{"abcdef01":{"name":"%s","checked":"invalid"}}\n' "$name" > "$EF/state/positions.json"
+  efcheck 1 'daily export missed' --alert
+done
+check "freshness alerts for bot-1 and bot-2 are distinct incidents" test "$(nalerts 'daily export missed')" = 2
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+
+step "export warnings and expected-bot roster suggestions"
+echo '{"abcdef01":{"name":"bot-a","warnings":["test warning"]},"abcdef02":{"name":"bot-b","deleted":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+efcheck 1 'export warnings: 1 active bot(s) with warnings (see staging/server-export/INDEX.md): bot-a' --warnings --alert
+check "warnings: no deleted name and no alert even with --alert" all test "$out" = 'export warnings: 1 active bot(s) with warnings (see staging/server-export/INDEX.md): bot-a' --and-- test ! -s "$TMP/state/ALERT"
+echo '{"abcdef02":{"deleted":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+efcheck 0 'no export warnings' --warnings
+echo '["abcdef02"]' > "$TMP/daily-deleted.json"
+efc=$(mkcfg warnings-filter "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json" 'RETIRED_BOTS=("BOT C")')
+echo '{"abcdef01":{"name":"bot-a"},"abcdef02":{"name":"bot-b","warnings":["ignored"]},"abcdef03":{"name":"bot-c","warnings":["ignored"]},"abcdef04":{"unreadable":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+efcheck 0 'no export warnings' --warnings
+echo '{"abcdef01":{"name":"bot-a"}}' > "$EF/state/positions.json"
+efcheck 0 'no export warnings' --warnings
+
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+json.dump({"abcdef01": {"name": "bot-a"}, "abcdef02": {"name": "bot-b"},
+           "abcdef03": {"name": "bot-c"}, "abcdef04": {"unreadable": True},
+           "abcdef05": {"name": "bot-e", "deleted": True}, "abcdef06": {},
+           "abcdef07": {"name": "bot space ' quote \" $() `literal` \\"}}, open(sys.argv[1], "w"))
+PYFIX
+rc=0; GB_CONFIG="$efc" "$REPO_DIR/expected-bots.sh" --suggest > "$TMP/suggest.env" || rc=$?
+check "suggest: exit 0 and review reminder" all test "$rc" = 0 --and-- grep -qx '# paste into config.env; review the list' "$TMP/suggest.env"
+suggest_roundtrip() {
+  bash -c 'source "$1"; printf "%s\0" "${EXPECTED_BOTS[@]}"' _ "$TMP/suggest.env" > "$TMP/suggest.values" || return 1
+  python3 - "$TMP/suggest.values" <<'PYFIX'
+import sys
+assert open(sys.argv[1], "rb").read().decode().split("\0")[:-1] == [
+    "abcdef06", "bot space ' quote \" $() `literal` \\", "bot-a"]
+PYFIX
+}
+check "suggest: sourceable Bash, sorted names/id fallback, literal shell characters, active bots only" suggest_roundtrip
+echo '{"abcdef01":{"deleted":true}}' > "$EF/state/positions.json"
+rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/expected-bots.sh" --suggest) || rc=$?
+checkx "suggest: no active bots yields an empty array" 'test "$rc" = 0 && [[ "$out" == EXPECTED_BOTS=\(\)* ]]'
+rm "$EF/state/positions.json"
+rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/expected-bots.sh" --suggest) || rc=$?
+checkx "suggest: no export yet exits 2 with guidance" 'test "$rc" = 2 && [[ "$out" == "no server-side export yet" ]]'
+efcheck 2 'no server-side export yet' --warnings
+efpos 1 40
 efc=$(mkcfg daily-off "export SERVER_EXPORT_DIR=$EF" 'EXPORT_MISSED_HOURS=0')
 efcheck 0 'daily export check disabled'
+echo '{"abcdef01":{"name":"bot-a","warnings":["test warning"]}}' > "$EF/state/positions.json"
+efcheck 1 'export warnings: 1 active bot(s)' --warnings
 efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
 rm "$EF/state/positions.json"
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
@@ -784,7 +861,7 @@ printf 'time=1e9999\nholder=check.sh\n' > "$V/backup-skipped"; vdoc; vstatus
 check "garbled skip epoch is ignored by both diagnostics" all grep -q '^OK *skipped backup: none pending' "$TMP/visibility.out" --and-- not grep -q '^!! hourly backup skipped' "$TMP/visibility-status.out"
 
 step "doctor.sh: PROBLEM / WARN / OK, exit codes, --json, status.sh --doctor, lock ownership, garbled state"
-D="$TMP/state-doc"; mkdir -p "$D"; dc=$(mkcfg doc "GB_STATE=$D")
+D="$TMP/state-doc"; mkdir -p "$D"; dc=$(mkcfg doc "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0')
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "fresh state: exit 2, scheduler NOT running, no backup yet, Overall: PROBLEM" all test "$rc" = 2 --and-- grep -q '^PROBLEM *scheduler: NOT running' "$TMP/doc.out" --and-- grep -q '^PROBLEM *last backup: no complete' "$TMP/doc.out" --and-- grep -q '^Overall: PROBLEM' "$TMP/doc.out"
@@ -798,6 +875,8 @@ now_s > "$D/scheduler.heartbeat"; now_s > "$D/last-success"; now_s > "$D/last-ch
 now_s > "$D/last-success-quick"
 for h in {1..24}; do echo "$(( $(now_s) / 3600 * 3600 - h * 3600 + 1200 ))"; done > "$D/hourly-history"
 printf 'drive_pct=20\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
+# Healthy diagnostics need every active bot fresh; roster onboarding is tested separately below.
+mkpos tid-2=3600
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "healthy state: exit 0, Overall: OK, no WARN/PROBLEM lines" all test "$rc" = 0 --and-- grep -q '^Overall: OK' "$TMP/doc.out" --and-- not grep -qE '^(WARN|PROBLEM)' "$TMP/doc.out"
 check "no-channel warning explicitly disabled: doctor says disabled on purpose" grep -q '^OK *alert channel: disabled on purpose' "$TMP/doc.out"
@@ -809,7 +888,7 @@ echo "$(( $(now_s) + 1 ))" > "$D/last-success"
 GB_CONFIG="$dc" "$REPO_DIR/status.sh" --local > "$TMP/skip-status.out" 2>&1
 check "a newer success restores healthy status despite the older skip file" all not grep -q '^!! hourly backup skipped' "$TMP/skip-status.out" --and-- grep -qx 'Overall: OK' "$TMP/skip-status.out"
 rm -f "$D/backup-skipped"; now_s > "$D/last-success"
-dcwarn=$(mkcfg doc-no-channel "GB_STATE=$D" 'ALERT_CHANNEL_REQUIRED=1')
+dcwarn=$(mkcfg doc-no-channel "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1')
 rc=0; GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" >"$TMP/channel-doc.out" 2>&1 || rc=$?
 check "no channel configured: doctor exit 1 and loud WARN with guidance" all test "$rc" = 1 --and-- grep -q '^WARN *alert channel: NO ALERT CHANNEL:.*nobody is told.*run ./test-alert.sh' "$TMP/channel-doc.out"
 GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" --json >"$TMP/channel-doc.json" 2>&1 || true
@@ -819,7 +898,7 @@ d = json.load(open(sys.argv[1])); a, c = d["checks"][:2]
 assert d["exit"] == 1 and a["name"] == "alerts"
 assert c["name"] == "alert channel" and c["status"] == "WARN" and "NO ALERT CHANNEL" in c["detail"]
 PY
-dcchan=$(mkcfg doc-channel "GB_STATE=$D" 'ALERT_CHANNEL_REQUIRED=1' \
+dcchan=$(mkcfg doc-channel "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1' \
   'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
   'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"')
 rc=0; GB_CONFIG="$dcchan" "$REPO_DIR/doctor.sh" >"$TMP/channel-configured.out" 2>&1 || rc=$?
@@ -836,15 +915,61 @@ done
 run_ok "test-alert tests the configured doctor channels" env GB_CONFIG="$dcchan" "$REPO_DIR/test-alert.sh"
 rc=0; GB_CONFIG="$dcchan" "$REPO_DIR/doctor.sh" --json >"$TMP/channel-tested.json" 2>&1 || rc=$?
 check "successful test: doctor JSON shows tested channel names, never destinations" all test "$rc" = 0 --and-- python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));c=next(c for c in d["checks"] if c["name"]=="alert channel");assert c["status"]=="OK" and c["detail"]=="configured (ntfy+webhook), test passed"' "$TMP/channel-tested.json" --and-- not grep -qE 'alerts\.example\.invalid|secret-abc' "$TMP/channel-configured.out" "$TMP/channel-tested.json" "$TMP/channel-status.out"
-efpos 1 40
-defc=$(mkcfg doc-daily "GB_STATE=$D" "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+efpos 1 2
+defc=$(mkcfg doc-daily "GB_STATE=$D" "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""' 'EXPECTED_BOTS_REQUIRED=0')
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor fresh daily export: exit 0 + OK row" all test "$rc" = 0 --and-- grep -q '^OK       daily export: daily export OK' "$TMP/daily-doc.out"
-efpos 40 50
+efpos 1 40
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor stale daily export: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: daily export missed' "$TMP/daily-doc.out"
+check "doctor mixed ages: names only the stale bot" all grep -q 'oldest: bot-b 40 h)' "$TMP/daily-doc.out" --and-- not grep -q 'oldest: bot-a' "$TMP/daily-doc.out"
+
+step "doctor export warnings and roster onboarding"
+efpos 1 2
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: pos = json.load(f)
+pos["abcdef01"]["warnings"] = ["test warning"]
+pos["abcdef03"] = {"name": "bot-c", "deleted": True, "warnings": ["ignored"]}
+with open(p, "w") as f: json.dump(pos, f)
+PYFIX
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" --json >"$TMP/export-doc.json" 2>&1 || rc=$?
+check "doctor warnings: exit 1, WARN immediately after daily export, active name only" all test "$rc" = 1 --and-- python3 - "$TMP/export-doc.json" <<'PYFIX'
+import json, sys
+rows = json.load(open(sys.argv[1]))["checks"]
+i = next(i for i, row in enumerate(rows) if row["name"] == "daily export")
+assert rows[i]["status"] == "OK"
+assert rows[i+1] == {"name": "export warnings", "status": "WARN", "detail":
+    "export warnings: 1 active bot(s) with warnings (see staging/server-export/INDEX.md): bot-a"}
+PYFIX
+echo '{"abcdef01":{"name":"bot-a","deleted":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor ignores deleted warnings: exit 0, OK warnings row" all test "$rc" = 0 --and-- grep -qx 'OK       export warnings: no export warnings' "$TMP/daily-doc.out"
+efpos 1 2
+reqc=$(mkcfg doc-roster "source $defc" 'EXPECTED_BOTS_REQUIRED=1' 'EXPECTED_BOTS=()')
+rc=0; GB_CONFIG="$reqc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + active bots: exit 1 and actionable WARN" all test "$rc" = 1 --and-- grep -qx 'WARN     expected bots: no roster configured: bots could silently drop out of the export unnoticed; run ./expected-bots.sh --suggest and paste the result into config.env (EXPECTED_BOTS)' "$TMP/roster-doc.out"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + required=0: exit 0, OK expected bots and warnings" all test "$rc" = 0 --and-- grep -qx 'OK       expected bots: no roster configured (EXPECTED_BOTS is empty)' "$TMP/roster-doc.out" --and-- grep -qx 'OK       export warnings: no export warnings' "$TMP/roster-doc.out"
+efpos 1 2
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: pos = json.load(f)
+for rec in pos.values(): rec.update(total=0, max_pos=-1)
+with open(p, "w") as f: json.dump(pos, f)
+PYFIX
+rostered=$(mkcfg doc-rostered "source $reqc" 'EXPECTED_BOTS=("bot-a" "bot-b")')
+rc=0; GB_CONFIG="$rostered" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor configured roster + active bots: exit 0 and OK" all test "$rc" = 0 --and-- grep -q '^OK *expected bots: all 2 expected bots present and complete' "$TMP/roster-doc.out"
+echo '{"abcdef01":{"deleted":true},"abcdef02":{"unreadable":true}}' > "$EF/state/positions.json"
+rc=0; GB_CONFIG="$reqc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + no active bots: exit 0 and OK" all test "$rc" = 0 --and-- grep -qx 'OK       expected bots: no roster configured (no active exported bots)' "$TMP/roster-doc.out"
 rm -f "$EF/state/positions.json"
 now_s > "$D/first-start"
+rc=0; GB_CONFIG="$reqc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + no export: exit 0, OK roster and no-export warnings row" all test "$rc" = 0 --and-- grep -qx 'OK       expected bots: no roster configured (no server-side export on this box)' "$TMP/roster-doc.out" --and-- grep -qx 'OK       export warnings: no export yet' "$TMP/roster-doc.out"
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor no export during first-start grace: exit 0 + OK row" all test "$rc" = 0 --and-- grep -q '^OK       daily export: no server-side export yet (first-start grace)' "$TMP/daily-doc.out"
 echo $(( $(now_s) - 27 * 3600 )) > "$D/first-start"
@@ -854,7 +979,7 @@ rm -f "$D/first-start"
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor no export without first-start marker: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: no server-side export yet' "$TMP/daily-doc.out"
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
-check "one line per topic" bash -c 'for t in alerts "alert channel" scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
+check "one line per topic" bash -c 'for t in alerts "alert channel" scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export" "export warnings"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
 echo '{"agents":{"tid-2":{}}}' > "$TMP/deleted-agents.json"
 dcd=$(mkcfg doc-deleted "GB_STATE=$D" 'EXPECTED_BOTS=("Old Bot")')
 rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?

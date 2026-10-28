@@ -232,9 +232,20 @@ else row OK "drive report" "no upload yet (after the next hourly backup)"; fi
 
 # --- expected bots (EXPECTED_BOTS roster vs the latest server-side export)
 eb=$("$GB_DIR/expected-bots.sh" 2>/dev/null); erc=$?
+if (( ${#EXPECTED_BOTS[@]} == 0 )); then
+  suggested=$("$GB_DIR/expected-bots.sh" --suggest 2>/dev/null); src=$?
+  if (( src == 2 )); then
+    eb="no roster configured (no server-side export on this box)"
+  elif (( src == 0 )) && [[ "$suggested" == EXPECTED_BOTS=\(\)* ]]; then
+    eb="no roster configured (no active exported bots)"
+  elif (( src == 0 )) && [[ "$EXPECTED_BOTS_REQUIRED" != 0 ]]; then
+    erc=1
+    eb="no roster configured: bots could silently drop out of the export unnoticed; run ./expected-bots.sh --suggest and paste the result into config.env (EXPECTED_BOTS)"
+  elif (( src == 1 )); then eb="${suggested%%$'\n'*}"; erc=1; fi
+fi
 case "$erc" in 0) row OK "expected bots" "$eb";; 1) row WARN "expected bots" "$eb";; *) row WARN "expected bots" "${eb:-check failed}";; esac
 
-# --- daily export (newest active per-bot check)
+# --- daily export (every active per-bot check)
 ef=$("$GB_DIR/export-freshness.sh" 2>/dev/null); erc=$?
 ef=${ef%%$'\n'*}
 case "$erc" in
@@ -247,6 +258,14 @@ case "$erc" in
       row WARN "daily export" "$ef"
     fi;;
   *) row WARN "daily export" "${ef:-check failed}";;
+esac
+
+# --- export warnings (INDEX.md; diagnostic only)
+ew=$("$GB_DIR/export-freshness.sh" --warnings 2>/dev/null); erc=$?
+case "$erc" in
+  0) row OK "export warnings" "$ew";;
+  2) row OK "export warnings" "no export yet";;
+  *) row WARN "export warnings" "${ew:-check failed}";;
 esac
 
 # --- output
