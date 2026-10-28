@@ -58,7 +58,7 @@ Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md
 | every hour at :17 | full snapshot + brain export + SQLite copies + forget | `auto` | hourly 24, daily 30, weekly 12, monthly 12 |
 | every 15 min | quick snapshot, same roots/excludes (unchanged files are only stat'ed) | `quick` | everything of the last 24 h |
 | once, after the first hourly | `test-restore.sh` (real restore of a sample + checksum verify, then deleted) | | |
-| weekly, Sunday 02:20 | `test-restore.sh --weekly` (critical files + sample, SHA-256 compare with live files); `TEST_RESTORE_WEEKDAY` / `TEST_RESTORE_AT` | | |
+| weekly, Sunday 02:20 | `test-restore.sh --weekly` (critical files + sample, SHA-256 compare with live files); first hourly's successful test covers the current slot, then next due weekday/time; `TEST_RESTORE_WEEKDAY` / `TEST_RESTORE_AT` | | |
 | daily 04:40 | `check.sh`: forget by tag, `restic check --read-data-subset 5%`, then prune; on day 1 of a month also a test restore | | |
 | hourly :50 | watchdog: ALERT if no successful hourly snapshot for 3 h | | |
 

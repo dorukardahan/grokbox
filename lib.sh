@@ -23,6 +23,9 @@ source "$GB_CONFIG"
 GB_UNLOCK_DONE=0
 : "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
 [[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
+if [[ "$TEST_RESTORE_WEEKDAY" =~ ^[0-6]$ ]]; then : "${TEST_RESTORE_MAX_DAYS:=10}"
+else : "${TEST_RESTORE_MAX_DAYS:=35}"; fi
+: "${TEST_RESTORE_FIRST_DAYS:=3}"
 [[ -v EXPECTED_BOTS ]] || EXPECTED_BOTS=()
 : "${AGENTS_DIR=/home/box/agent-data/agents}"
 export AGENTS_DIR

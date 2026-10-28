@@ -78,11 +78,11 @@ if [[ "$(kv_get "$GB_STATE/report-upload.status" result)" == failed ]]; then
   problems=1; echo "!! Drive report: $([[ "$(kv_get "$GB_STATE/report-upload.status" stage)" == build ]] && echo build || echo upload) of latest-backup-report.txt FAILED at $(date -d "@$(kv_epoch "$GB_STATE/report-upload.status" time)" '+%F %H:%M %Z' 2>/dev/null || echo ?) (see $LOG; retried after the next hourly backup)"; fi
 if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then problems=1; echo "!! CHECK FAILED latch set: prune blocked until a passing integrity check"; fi
 if [[ -e "$SQLITE_LATCH" ]]; then problems=1; echo "!! SQLITE LATCH set ($(ts "$SQLITE_LATCH")): SQLite staging failed; forget/prune blocked until a fully successful hourly backup"; fi
-if [[ -s "$GB_STATE/last-success" ]]; then   # test restore: monthly, so allow 35 days (grace counted from first start)
+if [[ -s "$GB_STATE/last-success" ]]; then   # same test-restore age and first-start grace as doctor.sh
   if [[ -s "$GB_STATE/last-test-restore" ]]; then
     tr_age=$(( (now - $(cat "$GB_STATE/last-test-restore")) / 86400 ))
-    (( tr_age > 35 )) && { problems=1; echo "!! last successful test restore is ${tr_age} days old (expected monthly)"; }
-  elif [[ -n "$first" ]] && (( now - first > 35 * 86400 )); then
+    (( tr_age > TEST_RESTORE_MAX_DAYS )) && { problems=1; echo "!! last successful test restore is ${tr_age} days old (expected $([[ "$TEST_RESTORE_WEEKDAY" =~ ^[0-6]$ ]] && echo weekly || echo monthly))"; }
+  elif [[ -n "$first" ]] && (( now - first > TEST_RESTORE_FIRST_DAYS * 86400 )); then
     problems=1; echo "!! no successful test restore yet, $(( (now - first) / 86400 )) days after install (run check.sh --test-restore)"; fi
 fi
 if [[ "${1:-}" == --local ]]; then echo "Overall: $([[ $problems == 0 ]] && echo OK || echo ATTENTION NEEDED)"; exit 0; fi

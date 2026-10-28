@@ -216,9 +216,9 @@ weekly=""; [[ "${TEST_RESTORE_WEEKDAY:-}" =~ ^[0-6]$ ]] && weekly=1
 if [[ "$tres" == failed ]]; then row PROBLEM "test restore" "FAILED at $(at "$tt") (${tf:-?} files restored, ${tm:-?} mismatches): see state/test-restore-result.txt and the log; rerun ./test-restore.sh"
 elif isnum "$tt"; then
   d=$(( (now - tt) / 86400 ))
-  if (( d > 35 )) || { [[ -n "$weekly" ]] && (( d > 10 )); }; then row WARN "test restore" "last OK one is $d days old (expected $([[ -n $weekly ]] && echo weekly || echo monthly)); run ./test-restore.sh"
+  if (( d > TEST_RESTORE_MAX_DAYS )); then row WARN "test restore" "last OK one is $d days old (expected $([[ -n $weekly ]] && echo weekly || echo monthly)); run ./test-restore.sh"
   else row OK "test restore" "ok $(ago "$tt")${tf:+ ($tf files verified, ${tm:-0} mismatches)}"; fi
-elif [[ -n "$ok_t" ]] && isnum "$first" && (( now - first > 35 * 86400 )); then row WARN "test restore" "never succeeded, $(( (now - first) / 86400 )) days after install: run ./test-restore.sh"
+elif [[ -n "$ok_t" ]] && isnum "$first" && (( now - first > TEST_RESTORE_FIRST_DAYS * 86400 )); then row WARN "test restore" "no test restore has ever succeeded, $(( (now - first) / 86400 )) days after install; run ./test-restore.sh"
 else row OK "test restore" "not yet (runs once after the first hourly backup, then $([[ -n $weekly ]] && echo weekly || echo monthly))"; fi
 
 # --- Drive report upload (state/report-upload.status from report.sh)

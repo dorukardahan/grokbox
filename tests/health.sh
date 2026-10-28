@@ -115,6 +115,7 @@ nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$T
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
 run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
 old=$(mkcfg old 'unset PRUNE_SKIP_PROBLEM_DAYS HOURLY_MISS_WARN HOURLY_SLOT_WINDOW_H ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_REQUIRED EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "older config gets weekly restore age 10 and first-success grace 3" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$TEST_RESTORE_MAX_DAYS" == 10 && "$TEST_RESTORE_FIRST_DAYS" == 3 ]]' _ "$REPO_DIR"
 run_ok "older config defaults to requiring an expected-bot roster" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$EXPECTED_BOTS_REQUIRED" == 1 ]]' _ "$REPO_DIR"
 run_ok "older config gets prune and hourly visibility defaults" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$PRUNE_SKIP_PROBLEM_DAYS" == 3 && "$HOURLY_MISS_WARN" == 1 && "$HOURLY_SLOT_WINDOW_H" == 24 ]]' _ "$REPO_DIR"
 run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ -z "$ALERT_NTFY_URL" && -z "$ALERT_WEBHOOK_URL" && "$ALERT_CHANNEL_REQUIRED" == 1 && "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
@@ -860,6 +861,43 @@ check "newer success clears status skip warning" not grep -q '^!! hourly backup 
 printf 'time=1e9999\nholder=check.sh\n' > "$V/backup-skipped"; vdoc; vstatus
 check "garbled skip epoch is ignored by both diagnostics" all grep -q '^OK *skipped backup: none pending' "$TMP/visibility.out" --and-- not grep -q '^!! hourly backup skipped' "$TMP/visibility-status.out"
 
+step "doctor/status: shared test-restore age and first-success grace (fixed clock)"
+restore_health() {   # NAME WEEKDAY AGE_DAYS EXPECTED [MAX_DAYS]
+  local cfg name="$1" weekday="$2" age="$3" expected="$4"; shift 4
+  cfg=$(mkcfg "restore-$name" "GB_STATE=$V" "TEST_RESTORE_WEEKDAY='$weekday'" "$@")
+  echo "$(( FIXED_NOW - age * 86400 ))" > "$V/last-test-restore"
+  PATH="$TMP/clockbin:$PATH" GB_CONFIG="$cfg" "$REPO_DIR/doctor.sh" > "$TMP/restore-doc.out" 2>&1 || true
+  PATH="$TMP/clockbin:$PATH" GB_CONFIG="$cfg" "$REPO_DIR/status.sh" --local > "$TMP/restore-status.out" 2>&1
+  if [[ "$expected" == WARN ]]; then
+    check "$name: doctor and status warn at $age days" all grep -q "^WARN *test restore: last OK one is $age days old" "$TMP/restore-doc.out" --and-- grep -q "^!! last successful test restore is $age days old" "$TMP/restore-status.out"
+  else
+    check "$name: doctor and status accept $age days" all grep -q '^OK *test restore: ok' "$TMP/restore-doc.out" --and-- not grep -q '^!! last successful test restore' "$TMP/restore-status.out"
+  fi
+}
+restore_health weekly-old 0 11 WARN
+restore_health weekly-fresh 0 9 OK
+restore_health monthly-fresh '' 20 OK
+restore_health monthly-old '' 36 WARN
+restore_health explicit-old 0 4 WARN TEST_RESTORE_MAX_DAYS=3
+restore_health explicit-fresh 0 3 OK TEST_RESTORE_MAX_DAYS=3
+restore_health monthly-explicit '' 4 WARN TEST_RESTORE_MAX_DAYS=3
+rm -f "$V/last-test-restore"
+for days in 4 1; do
+  echo "$(( FIXED_NOW - days * 86400 ))" > "$V/first-start"
+  vdoc; vstatus
+  if (( days == 4 )); then
+    check "no first restore after 4 days: doctor and status warn" all grep -q '^WARN *test restore: no test restore has ever succeeded, 4 days after install; run ./test-restore.sh' "$TMP/visibility.out" --and-- grep -q '^!! no successful test restore yet, 4 days after install' "$TMP/visibility-status.out"
+  else
+    check "no first restore after 1 day: both allow grace" all grep -q '^OK *test restore: not yet' "$TMP/visibility.out" --and-- not grep -q '^!! no successful test restore yet' "$TMP/visibility-status.out"
+  fi
+done
+first_cfg=$(mkcfg restore-first "GB_STATE=$V" TEST_RESTORE_FIRST_DAYS=0)
+vdoc "$first_cfg"
+PATH="$TMP/clockbin:$PATH" GB_CONFIG="$first_cfg" "$REPO_DIR/status.sh" --local > "$TMP/restore-status.out" 2>&1
+check "explicit first-success grace 0 wins in both diagnostics" all grep -q '^WARN *test restore: no test restore has ever succeeded, 1 days after install' "$TMP/visibility.out" --and-- grep -q '^!! no successful test restore yet, 1 days after install' "$TMP/restore-status.out"
+rm -f "$V/last-success"; vdoc; vstatus
+check "no complete hourly backup: neither warns about a missing first restore" all grep -q '^OK *test restore: not yet' "$TMP/visibility.out" --and-- not grep -q '^!! no successful test restore yet' "$TMP/visibility-status.out"
+
 step "doctor.sh: PROBLEM / WARN / OK, exit codes, --json, status.sh --doctor, lock ownership, garbled state"
 D="$TMP/state-doc"; mkdir -p "$D"; dc=$(mkcfg doc "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0')
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
@@ -1083,6 +1121,93 @@ old_doc=$(mkcfg old-doc "source $old" "export AGENTS_DIR=$TMP/agents" "DELETED_B
 GB_CONFIG="$old_doc" "$REPO_DIR/doctor.sh" --json >"$TMP/doc.json" 2>&1 || true
 check "doctor.sh with an older config.env (no new settings) still produces valid JSON" python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d["overall"] in ("OK","WARN","PROBLEM")' "$TMP/doc.json"
 kill "$SP" 2>/dev/null || true; wait "$SP" 2>/dev/null || true
+
+step "scheduler: first restore and never-succeeded retries (stub jobs and clock under /tmp)"
+SC="$TMP/scheduler-fixture"; mkdir -p "$SC/clockbin"
+cp "$REPO_DIR/scheduler.sh" "$REPO_DIR/lib.sh" "$SC/"
+cat > "$SC/clockbin/date" <<'CLOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+now=$(cat "$SC_STATE/clock")
+if [[ "${1:-}" == -d ]]; then
+  if [[ "$2" =~ ^-([0-9]+)\ days$ ]]; then
+    now=$(( now - BASH_REMATCH[1] * 86400 )); shift 2
+  else exec /usr/bin/date "$@"; fi
+fi
+exec /usr/bin/date -d "@$now" "$@"
+CLOCK
+cat > "$SC/clockbin/sleep" <<'CLOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+step=$(cat "$SC_STATE/step" 2>/dev/null || echo 0)
+slot=$(cat "$SC_STATE/sched-test-restore" 2>/dev/null || echo missing)
+retry=$(cat "$SC_STATE/sched-test-restore-retry" 2>/dev/null || echo missing)
+calls=$(wc -l < "$SC_STATE/calls")
+echo "$step slot=$slot retry=$retry calls=$calls" >> "$SC_STATE/boundaries"
+step=$(( step + 1 )); echo "$step" > "$SC_STATE/step"
+next=$(sed -n "${step}p" "$SC_STATE/ticks")
+if [[ -z "$next" ]]; then kill -TERM "$PPID"; exit 0; fi
+echo "$next" > "$SC_STATE/clock"
+CLOCK
+cat > "$SC/backup.sh" <<'JOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+date +%s > "$SC_STATE/last-success"
+JOB
+cat > "$SC/test-restore.sh" <<'JOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "${1:-once}" >> "$SC_STATE/calls"
+n=$(wc -l < "$SC_STATE/calls")
+rc=$(sed -n "${n}p" "$SC_STATE/outcomes"); rc=${rc:-0}
+if (( rc == 0 )); then date +%s > "$SC_STATE/last-test-restore"; fi
+exit "$rc"
+JOB
+for job in report expected-bots export-freshness check; do
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nexit 0\n' > "$SC/$job.sh"
+done
+for job in restic rclone curl; do
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nexit 99\n' > "$SC/clockbin/$job"
+done
+chmod +x "$SC"/*.sh "$SC/clockbin/"*
+sched_case() {   # NAME HOURLY_MIN OUTCOMES INITIAL_STATE TICK...
+  local name="$1" hourly="$2" outcomes="$3" initial="$4" cfg tick rc=0; shift 4
+  export SC_STATE="$SC/$name"; mkdir -p "$SC_STATE"
+  : > "$SC_STATE/calls"; tr ' ' '\n' <<< "$outcomes" > "$SC_STATE/outcomes"
+  /usr/bin/date -u -d '2000-01-09 01:00' +%s > "$SC_STATE/clock"
+  for tick in "$@"; do /usr/bin/date -u -d "$tick" +%s; done > "$SC_STATE/ticks"
+  if [[ "$initial" != fresh ]]; then
+    cp "$SC_STATE/clock" "$SC_STATE/last-success"; touch "$SC_STATE/test-restore-attempted"
+  fi
+  if [[ "$initial" == succeeded ]]; then
+    cp "$SC_STATE/clock" "$SC_STATE/last-test-restore"
+    echo 2000-01-02 > "$SC_STATE/sched-test-restore"
+  fi
+  cfg=$(mkcfg "sched-$name" "GB_DIR=$SC" "GB_BIN=$SC/clockbin" "GB_STATE=$SC_STATE" "HOURLY_AT_MIN=$hourly" QUICK_EVERY_MIN=0 WATCHDOG_AT_MIN=60 'DAILY_CHECK_AT="23:59"' TEST_RESTORE_WEEKDAY=0 'TEST_RESTORE_AT="02:20"')
+  PATH="$SC/clockbin:$PATH" GB_CONFIG="$cfg" timeout -k 1 5 "$SC/scheduler.sh" > "$SC_STATE/output" 2>&1 || rc=$?
+  check "$name: scheduler completed the controlled ticks" test "$rc" = 143
+  if [[ "$initial" == succeeded ]]; then
+    check "$name: first start preserves the existing weekly slot" grep -qx '0 slot=2000-01-02 retry=missing calls=0' "$SC_STATE/boundaries"
+  else
+    check "$name: first start leaves the weekly slot unmarked" grep -qx '0 slot=missing retry=missing calls=0' "$SC_STATE/boundaries"
+  fi
+}
+sched_case fresh 60 0 fresh '2000-01-09 03:00'
+check "fresh scheduler with no hourly success does not run a restore" test ! -s "$SC_STATE/calls"
+sched_case once 0 '0 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-16 02:20'
+check "once success marks this slot and avoids a second restore on the next tick" grep -qx '2 slot=2000-01-09 retry=missing calls=1' "$SC_STATE/boundaries"
+check "weekly restore runs at the next due weekday/time after once" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-16 --and-- test -s "$SC_STATE/test-restore-attempted"
+sched_case failed-once 0 '6 6 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-10 03:00' '2000-01-10 03:01'
+check "failed once leaves weekly due; failed weekly unmarks slot and remembers today" grep -qx '1 slot=missing retry=2000-01-09 calls=2' "$SC_STATE/boundaries"
+check "never succeeded: no second weekly attempt that day" grep -qx '2 slot=missing retry=2000-01-09 calls=2' "$SC_STATE/boundaries"
+check "never succeeded: next day retries the same due slot and records success" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test -s "$SC_STATE/last-test-restore"
+sched_case busy 60 '75 0' attempted '2000-01-09 03:00' '2000-01-09 03:01'
+check "lock busy leaves slot unmarked without delaying until tomorrow" grep -qx '1 slot=missing retry=missing calls=1' "$SC_STATE/boundaries"
+check "lock busy retries next minute and marks the successful slot" all test "$(cat "$SC_STATE/calls")" = $'--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09
+sched_case catchup 60 0 attempted '2000-01-09 02:19'
+check "fresh scheduler catches up the previous due slot before this week's time" all test "$(cat "$SC_STATE/calls")" = --weekly --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-02
+sched_case prior-success 60 6 succeeded '2000-01-09 03:00' '2000-01-10 03:00'
+check "a prior success keeps failed weekly slot marked without daily retries" all test "$(cat "$SC_STATE/calls")" = --weekly --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test ! -e "$SC_STATE/sched-test-restore-retry"
 
 step "scheduler: weekly test restore slot is due-based and followed by report.sh (waits for the next minute tick)"
 SCHED_CFG=$(mkcfg sched 'HOURLY_AT_MIN=60' 'QUICK_EVERY_MIN=0' 'WATCHDOG_AT_MIN=60' 'DAILY_CHECK_AT="23:59"' "TEST_RESTORE_WEEKDAY=$(TZ=UTC date +%w)" 'TEST_RESTORE_AT="00:00"')
