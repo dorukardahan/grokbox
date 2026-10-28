@@ -69,6 +69,8 @@ GB_SECRETS="$SEC"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
 export AGENTS_DIR="$TMP/agents"
+ALERT_CHANNEL_REQUIRED=0
+BACKUP_HOST=testhost
 export RESTIC_REPOSITORY="$REPO"
 export SERVER_EXPORT_DIR="$SE"
 DELETED_BOTS_FILE="$TMP/deleted-agents.json"
@@ -111,8 +113,8 @@ nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$T
 
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
 run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
-old=$(mkcfg old 'unset EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
-run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
+old=$(mkcfg old 'unset ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ -z "$ALERT_NTFY_URL" && -z "$ALERT_WEBHOOK_URL" && "$ALERT_CHANNEL_REQUIRED" == 1 && "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
 v=$(bash -c 'source "$1/lib.sh"; kv_write "$GB_STATE/kv.test" "result=ok" "time=42" "note=a=b"; kv_get "$GB_STATE/kv.test" note; kv_get "$GB_STATE/kv.test" missing; kv_get "$GB_STATE/nofile" x; echo end' _ "$REPO_DIR")
 check "kv_write/kv_get round trip; missing key/file give empty, never fail" test "$v" = "a=b
 end"
@@ -126,7 +128,7 @@ check "weekly slot: today's weekday before TEST_RESTORE_AT -> a week ago" test "
 check "weekly slot: tomorrow's weekday -> 6 days ago" test "$(slot 3 "$wdn" 00:00)" = "$(TZ=UTC date -d '-6 days' +%F)"
 check "weekly slot: empty TEST_RESTORE_WEEKDAY -> off (prints nothing)" test -z "$(slot 4 '""' 00:00)"
 
-step "alert dedupe (once per incident, numbers ignored, locked) + status.sh --ack starts a new incident"
+step "alert dedupe (once per incident, volatile numbers ignored, locked) + status.sh --ack starts a new incident"
 alert_in "$GB_CONFIG" "dup test message"; alert_in "$GB_CONFIG" "dup test message"; alert_in "$GB_CONFIG" "another message"
 check "two identical alerts + one other -> 2 lines in state/ALERT" test "$(wc -l < "$TMP/state/ALERT")" = 2
 check "...and 2 lines in logs/alerts.log" test "$(grep -c 'test message\|another message' "$TMP/logs/alerts.log")" = 2
@@ -156,6 +158,20 @@ check "an alert whose age grows every hour is ONE incident: 1 line in state/ALER
 check "...the repeats are logged with their current text" grep -q 'repeat 3.*held for 15h' "$LOGF"
 alert_in "$GB_CONFIG" "backup.lock held for 15h by: 4242 check.sh (past job timeout plus grace)"
 check "a different job in the text is a different incident" test "$(nalerts 'held for')" = 2
+for pair in 'bot-10 bot-30' 'Name2 Name3' 'v2 v3' 'abc123 abc456' 'bot_10 bot_30' 'bot.10 bot.30'; do
+  read -r first second <<<"$pair"
+  alert_in "$GB_CONFIG" "$first missing"; alert_in "$GB_CONFIG" "$second missing"
+  check "identifier digits distinguish $first from $second" test "$(grep -F -c -e "$first missing" -e "$second missing" "$TMP/state/ALERT")" = 2
+done
+alert_in "$GB_CONFIG" 'operation failed rc=1 at line 45 (pid 123)'
+alert_in "$GB_CONFIG" 'operation failed rc=2 at line 46 (pid 456)'
+check "return codes, line numbers and pids dedupe as one incident" test "$(nalerts 'operation failed')" = 1
+alert_in "$GB_CONFIG" 'sample at 2026-01-02 12:00:01 2026-01-02T12:01:01Z. failed'
+alert_in "$GB_CONFIG" 'sample at 2026-03-04 13:22:59 2026-03-04T13:24:59Z. failed'
+check "different timestamps dedupe as one incident" test "$(nalerts 'sample at')" = 1
+alert_in "$GB_CONFIG" 'usage 13.5MB (80%) over 12 files, 2 days, counts 1 2 3.'
+alert_in "$GB_CONFIG" 'usage 14.6MB (90%) over 15 files, 3 days, counts 4 5 6.'
+check "sizes, percentages, counts and adjacent numbers dedupe as one incident" test "$(nalerts 'usage')" = 1
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 for _ in $(seq 1 20); do alert_in "$GB_CONFIG" "parallel storm" & done; wait
 check "20 concurrent identical alerts: exactly 1 recorded, 20 counted (state/alert.lock serializes them)" all test "$(nalerts 'parallel storm')" = 1 --and-- grep -q ' 20$' "$TMP/state/alert-seen" --and-- test "$(wc -l < "$TMP/state/alert-seen")" = 1
@@ -184,6 +200,78 @@ chmod +x "$TMP/hook-recurse.sh"; mkcfg recurse "ALERT_HOOK='$TMP/hook-recurse.sh
 t0=$(now_s); alert_in "$TMP/config-recurse.env" "outer alert"; t1=$(now_s)
 checkx "a hook that raises an alert does not run the hook again and does not deadlock on the alert lock (ran once, both recorded, $((t1-t0)) s)" 'test "$(grep -c "^ran$" "$TMP/hook.out")" = 1 && grep -q "raised from inside the hook" "$TMP/state/ALERT" && grep -q "outer alert" "$TMP/state/ALERT" && test $((t1 - t0)) -lt 20'
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+
+step "built-in alert channels and synchronous test alert (fake curl, no network)"
+mkdir -p "$TMP/alertbin" "$TMP/curl-calls"
+cat > "$TMP/alertbin/curl" <<'FAKE'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(os.environ["FAKE_ALERT_DIR"])
+n = len(list(root.glob("body.*"))) + 1
+config = sys.stdin.read()
+(root / f"config.{n}").write_text(config)
+(root / f"argv.{n}").write_text(json.dumps(args))
+body = pathlib.Path(args[args.index("--data-binary") + 1][1:])
+(root / f"body.{n}").write_bytes(body.read_bytes())
+(root / f"mode.{n}").write_text(oct(body.stat().st_mode & 0o777))
+# Either stream can echo a secret URL: neither should reach logs or the terminal.
+print(config)
+print(config, file=sys.stderr)
+sys.exit(int(os.environ.get("FAKE_CURL_RC", "0")))
+FAKE
+chmod +x "$TMP/alertbin/curl"
+export FAKE_ALERT_DIR="$TMP/curl-calls"
+export PATH="$TMP/alertbin:$PATH"
+acfg=$(mkcfg channels "GB_STATE=$TMP/state-alert" "GB_LOGS=$TMP/logs-alert" \
+  'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
+  'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"' \
+  "ALERT_HOOK='cat >> $TMP/channel-hook.out'")
+payload=$'channel message with "quotes", backslash \\ and\na second line'
+run_ok "real alert with all three channels succeeds" alert_in "$acfg" "$payload"
+check "ntfy receives exact text; webhook JSON matches; curl argv contains no URL or message" \
+  python3 - "$FAKE_ALERT_DIR" "$payload" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); text = (root / "body.1").read_text()
+assert text.endswith(sys.argv[2])
+assert json.loads((root / "body.2").read_text()) == {"text": text}
+for n, kind in ((1, "text/plain"), (2, "application/json")):
+    args = json.loads((root / f"argv.{n}").read_text())
+    assert args[args.index("-K") + 1] == "-"
+    assert args[args.index("--request") + 1] == "POST"
+    assert f"Content-Type: {kind}" in args
+    assert all(a in args for a in ("--disable", "--fail", "--silent", "--show-error", "--max-time"))
+    assert "https://alerts.example.invalid/" in (root / f"config.{n}").read_text()
+    assert not any("secret-abc" in a or "channel message" in a for a in args)
+    assert (root / f"mode.{n}").read_text() == "0o600"
+PY
+alert_in "$acfg" "$payload" >"$TMP/send.out" 2>&1
+check "a repeated alert calls neither curl nor the hook again" all test "$(find "$FAKE_ALERT_DIR" -name 'body.*' | wc -l)" = 2 --and-- test "$(grep -c 'channel message' "$TMP/channel-hook.out")" = 1
+check "real delivery status records success, epoch and only channel names" all grep -qx 'result=ok' "$TMP/state-alert/alert-delivery.status" --and-- grep -qx 'channels=ntfy+webhook+hook' "$TMP/state-alert/alert-delivery.status" --and-- grep -qE '^time=[0-9]+$' "$TMP/state-alert/alert-delivery.status"
+rc=0; FAKE_CURL_RC=22 alert_in "$acfg" 'delivery fails' >"$TMP/send.out" 2>&1 || rc=$?
+check "curl failure never fails alert(), still tries other channels, records failed delivery" all test "$rc" = 0 --and-- grep -qx 'result=failed' "$TMP/state-alert/alert-delivery.status" --and-- grep -q 'webhook: FAILED (rc=22)' "$TMP/logs-alert/alert-hook.log" --and-- grep -q 'delivery fails' "$TMP/channel-hook.out"
+GB_CONFIG="$acfg" "$REPO_DIR/doctor.sh" >"$TMP/alert-doctor.out" 2>&1 || true
+check "doctor warns about last failed real delivery, with next step" grep -q '^WARN *alert channel: last alert delivery FAILED .*see logs/alert-hook.log, run ./test-alert.sh' "$TMP/alert-doctor.out"
+tcfg="$TMP/config-test-channels.env"
+{ cat "$acfg"; echo "GB_STATE=$TMP/state-alert-test"; } > "$tcfg"
+run_ok "test-alert succeeds synchronously through all configured channels" env GB_CONFIG="$tcfg" "$REPO_DIR/test-alert.sh"
+cp "$TMP/last.out" "$TMP/test-alert.out"
+check "test-alert prints one success line per channel and sends marked test text" all grep -qx 'ntfy: ok' "$TMP/test-alert.out" --and-- grep -qx 'webhook: ok' "$TMP/test-alert.out" --and-- grep -qx 'hook: ok' "$TMP/test-alert.out" --and-- grep -q 'TEST ALERT from testhost: if you can read this, alerting works' "$TMP/channel-hook.out"
+check "test success records result/time without incident or real-delivery state" all grep -qx 'result=ok' "$TMP/state-alert-test/alert-test.status" --and-- grep -qE '^time=[0-9]+$' "$TMP/state-alert-test/alert-test.status" --and-- test ! -e "$TMP/state-alert-test/ALERT" --and-- test ! -e "$TMP/state-alert-test/alert-delivery.status"
+before=$(wc -l < "$TMP/logs-alert/alerts.log")
+rc=0; FAKE_CURL_RC=22 GB_CONFIG="$tcfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-fail.out" 2>&1 || rc=$?
+check "failed test exits 1, reports per-channel rc, still sends hook; no incident written" all test "$rc" = 1 --and-- grep -qx 'ntfy: FAILED (rc=22)' "$TMP/test-alert-fail.out" --and-- grep -qx 'webhook: FAILED (rc=22)' "$TMP/test-alert-fail.out" --and-- grep -qx 'hook: ok' "$TMP/test-alert-fail.out" --and-- grep -qx 'result=failed' "$TMP/state-alert-test/alert-test.status" --and-- test ! -e "$TMP/state-alert-test/ALERT" --and-- test "$(wc -l < "$TMP/logs-alert/alerts.log")" = "$before"
+GB_CONFIG="$tcfg" "$REPO_DIR/doctor.sh" >"$TMP/alert-test-doctor.out" 2>&1 || true
+check "doctor warns when the last test failed" grep -q '^WARN *alert channel: configured (ntfy+webhook+hook), last alert test FAILED' "$TMP/alert-test-doctor.out"
+rc=0; FAKE_CURL_RC=28 GB_CONFIG="$tcfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-timeout.out" 2>&1 || rc=$?
+check "curl timeout is a failed test with rc 28" all test "$rc" = 1 --and-- grep -qx 'ntfy: FAILED (rc=28)' "$TMP/test-alert-timeout.out"
+thcfg=$(mkcfg test-hook "GB_STATE=$TMP/state-test-hook" "ALERT_HOOK='exit 7'")
+rc=0; GB_CONFIG="$thcfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-hook.out" 2>&1 || rc=$?
+check "hook-only test returns 1 and reports the hook rc" all test "$rc" = 1 --and-- grep -qx 'hook: FAILED (rc=7)' "$TMP/test-alert-hook.out"
+ncfg=$(mkcfg no-channels "GB_STATE=$TMP/state-alert-none")
+rc=0; GB_CONFIG="$ncfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-none.out" 2>&1 || rc=$?
+check "no-channel test exits 3 with setup guidance and no incident" all test "$rc" = 3 --and-- grep -qx 'no alert channel configured: set ALERT_NTFY_URL, ALERT_WEBHOOK_URL or ALERT_HOOK in config.env, then rerun ./test-alert.sh' "$TMP/test-alert-none.out" --and-- test ! -e "$TMP/state-alert-none/ALERT"
+check "secret destinations never appear in logs, doctor or test-alert output" not grep -qE 'alerts\.example\.invalid|secret-abc' "$TMP/logs-alert/alert-hook.log" "$TMP/logs-alert"/backup-*.log "$TMP/logs-alert/alerts.log" "$TMP/alert-doctor.out" "$TMP/alert-test-doctor.out" "$TMP/test-alert"*.out "$TMP/send.out"
 
 step "expected-bot roster (expected-bots.sh): completeness, in-progress grace, no-export alert, stable alerts"
 rc=0; out=$("$REPO_DIR/expected-bots.sh") || rc=$?
@@ -614,6 +702,34 @@ now_s > "$D/scheduler.heartbeat"; now_s > "$D/last-success"; now_s > "$D/last-ch
 printf 'drive_pct=20\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "healthy state: exit 0, Overall: OK, no WARN/PROBLEM lines" all test "$rc" = 0 --and-- grep -q '^Overall: OK' "$TMP/doc.out" --and-- not grep -qE '^(WARN|PROBLEM)' "$TMP/doc.out"
+check "no-channel warning explicitly disabled: doctor says disabled on purpose" grep -q '^OK *alert channel: disabled on purpose' "$TMP/doc.out"
+dcwarn=$(mkcfg doc-no-channel "GB_STATE=$D" 'ALERT_CHANNEL_REQUIRED=1')
+rc=0; GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" >"$TMP/channel-doc.out" 2>&1 || rc=$?
+check "no channel configured: doctor exit 1 and loud WARN with guidance" all test "$rc" = 1 --and-- grep -q '^WARN *alert channel: NO ALERT CHANNEL:.*nobody is told.*run ./test-alert.sh' "$TMP/channel-doc.out"
+GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" --json >"$TMP/channel-doc.json" 2>&1 || true
+check "doctor JSON includes the alert channel row right after alerts" python3 - "$TMP/channel-doc.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); a, c = d["checks"][:2]
+assert d["exit"] == 1 and a["name"] == "alerts"
+assert c["name"] == "alert channel" and c["status"] == "WARN" and "NO ALERT CHANNEL" in c["detail"]
+PY
+dcchan=$(mkcfg doc-channel "GB_STATE=$D" 'ALERT_CHANNEL_REQUIRED=1' \
+  'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
+  'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"')
+rc=0; GB_CONFIG="$dcchan" "$REPO_DIR/doctor.sh" >"$TMP/channel-configured.out" 2>&1 || rc=$?
+check "configured but untested channels: doctor exit 0, names and test guidance" all test "$rc" = 0 --and-- grep -q '^OK *alert channel: configured (ntfy+webhook), not tested yet: run ./test-alert.sh' "$TMP/channel-configured.out"
+for mode in local full; do
+  args=(); [[ "$mode" == local ]] && args=(--local)
+  GB_CONFIG="$dcwarn" "$REPO_DIR/status.sh" "${args[@]}" >"$TMP/channel-status.out" 2>&1
+  check "status $mode: missing channel is loud and Overall needs attention" all grep -q '^!! NO ALERT CHANNEL configured: nobody is told about failures' "$TMP/channel-status.out" --and-- grep -qx 'Overall: ATTENTION NEEDED' "$TMP/channel-status.out"
+  GB_CONFIG="$dc" "$REPO_DIR/status.sh" "${args[@]}" >"$TMP/channel-status.out" 2>&1
+  check "status $mode: no-channel warning disabled, Overall OK" all not grep -q 'NO ALERT CHANNEL' "$TMP/channel-status.out" --and-- grep -qx 'Overall: OK' "$TMP/channel-status.out"
+  GB_CONFIG="$dcchan" "$REPO_DIR/status.sh" "${args[@]}" >"$TMP/channel-status.out" 2>&1
+  check "status $mode: channel configured, Overall OK" all not grep -q 'NO ALERT CHANNEL' "$TMP/channel-status.out" --and-- grep -qx 'Overall: OK' "$TMP/channel-status.out"
+done
+run_ok "test-alert tests the configured doctor channels" env GB_CONFIG="$dcchan" "$REPO_DIR/test-alert.sh"
+rc=0; GB_CONFIG="$dcchan" "$REPO_DIR/doctor.sh" --json >"$TMP/channel-tested.json" 2>&1 || rc=$?
+check "successful test: doctor JSON shows tested channel names, never destinations" all test "$rc" = 0 --and-- python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));c=next(c for c in d["checks"] if c["name"]=="alert channel");assert c["status"]=="OK" and c["detail"]=="configured (ntfy+webhook), test passed"' "$TMP/channel-tested.json" --and-- not grep -qE 'alerts\.example\.invalid|secret-abc' "$TMP/channel-configured.out" "$TMP/channel-tested.json" "$TMP/channel-status.out"
 efpos 1 40
 defc=$(mkcfg doc-daily "GB_STATE=$D" "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
@@ -632,7 +748,7 @@ rm -f "$D/first-start"
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor no export without first-start marker: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: no server-side export yet' "$TMP/daily-doc.out"
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
-check "one line per topic" bash -c 'for t in alerts scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
+check "one line per topic" bash -c 'for t in alerts "alert channel" scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
 echo '{"agents":{"tid-2":{}}}' > "$TMP/deleted-agents.json"
 dcd=$(mkcfg doc-deleted "GB_STATE=$D" 'EXPECTED_BOTS=("Old Bot")')
 rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?

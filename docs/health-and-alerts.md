@@ -56,19 +56,34 @@ a `restic snapshots`/`ls` call that fails or times out and setup errors, raises 
 attempt) and exits 6; the report and doctor show it. A busy backup lock is not a failure: exit 75, the
 result file is left alone and the scheduler retries next minute.
 
-## 3. Alert dedupe and the optional alert hook
-**Dedupe (always on).** `alert()` records the same alert in `state/ALERT`, `logs/alerts.log` and the hook
-**once per incident**. The incident key ignores the timestamp and every number in the text, so a message
+## 3. Alert dedupe and delivery
+**Dedupe (always on).** `alert()` records the same alert in `state/ALERT`, `logs/alerts.log` and configured channels
+**once per incident**. The incident key ignores timestamps and standalone numbers (including units), so a message
 whose age, count or pid grows every hour (`backup.lock held for 13h ...`, `... 14h ...`, `no successful
 HOURLY snapshot for 5h`) is one incident: the first text is recorded, every repeat is noted in full in the
 month log (`ALERT (repeat N, same incident since ..., not re-recorded): <current text>`) and counted in
 `state/alert-seen`. A message that differs in words (another job, another bot, another error) is a new
-incident. A new incident also starts after `status.sh --ack` (which removes `state/alert-seen`) or
+incident; digits in identifiers such as `bot-10`, `Name2` and `abc123` are preserved. A new incident also
+starts after `status.sh --ack` (which removes `state/alert-seen`) or
 `ALERT_DEDUPE_HOURS` (default 24) after the first occurrence. The decision and the state writes happen
 under `state/alert.lock` (concurrent jobs, `--ack`), which is released before the hook runs, so a hook
 that raises an alert cannot deadlock. Scripts should still pass stable, specific messages.
 
-**Hook (off by default).** `ALERT_HOOK` is a shell command run for every *new* alert with the alert text
+### Get alerts to a human
+
+The repo does not pick a destination for you. All channels are optional and can be combined in private `config.env`:
+
+- ntfy: set `ALERT_NTFY_URL="https://ntfy.sh/<your-private-topic>"`.
+  Subscribe to that topic in your ntfy app; each new alert is posted as plain text.
+  Treat the URL like a password; config.env is private.
+- Webhook: set `ALERT_WEBHOOK_URL` to receive JSON `{"text": "<alert text>"}`; treat that URL like a password too.
+- Command: set `ALERT_HOOK` (examples below). Each channel uses `ALERT_HOOK_TIMEOUT` (default 60 s).
+
+Run `./test-alert.sh`: it sends a marked TEST synchronously and prints each channel's result; exit 0 = all passed, 1 = failed, 3 = none configured. It creates no incident.
+Doctor and status warn if no channel is configured; set `ALERT_CHANNEL_REQUIRED=0` to read only logs on purpose.
+Doctor also warns about failed real deliveries or tests. `logs/alert-hook.log` records failures without built-in destination URLs; failures never stop backups.
+
+`ALERT_HOOK` is a shell command run for every *new* alert with the alert text
 on stdin and in `$GB_ALERT_MSG`, under `timeout` (`ALERT_HOOK_TIMEOUT`, default 60 s). Its output goes to
 `logs/alert-hook.log`; a failing or hung hook is logged (`WARN alert hook exited rc=...`) and never fails
 the job that raised the alert. A hook that itself raises an alert does not trigger the hook again.
@@ -157,8 +172,9 @@ turns the upload off.
 |---|---|
 | `doctor.sh`, `report.sh`, `expected-bots.sh`, `export-freshness.sh` | health checks and reporting |
 | `state/alert-seen`, `state/alert.lock` | alert dedupe: `key first-seen count` per incident (removed by `status.sh --ack`); the lock around it |
+| `state/alert-delivery.status`, `state/alert-test.status` | last real delivery (`result`, `time`, `channels`: names only) and last test (`result`, `time`); tests do not clear a failed real delivery |
 | `state/report.lock` | serializes `report.sh` runs |
-| `logs/alert-hook.log` | output of `ALERT_HOOK` runs |
+| `logs/alert-hook.log` | command hook output and channel failure codes; built-in curl response/error text is discarded to protect destination URLs |
 | `state/test-restore.result` | last test restore: `result`, `time`, `files`, `mismatches`, `snapshot` |
 | `state/sched-test-restore` | date of the last weekly test-restore slot that ran |
 | `state/latest-backup-report.txt`, `state/report-upload.status` | the Drive report and its last upload result |

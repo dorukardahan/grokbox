@@ -90,7 +90,7 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   default; set `LOG_RETENTION_DAYS` to delete old `logs/backup-*.log` files.
 - **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. The same
   alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). No e-mail is sent by default: the box
-  cannot send messages on its own; an optional `ALERT_HOOK` command (mail, webhook) can be configured ([docs/health-and-alerts.md](docs/health-and-alerts.md)).
+  needs a destination: configure `ALERT_NTFY_URL`, `ALERT_WEBHOOK_URL` or `ALERT_HOOK`, then run `./test-alert.sh` ([Get alerts to a human](docs/health-and-alerts.md#get-alerts-to-a-human)).
   Both bot routines read `status.sh --local` and `state/ALERT` every day; their parent chats report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
   scheduler is noticed within a day.

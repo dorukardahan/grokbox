@@ -25,6 +25,17 @@ at(){ isnum "$1" && date -d "@$1" '+%F %H:%M' || echo "?"; }
 if [[ -s "$GB_STATE/ALERT" ]]; then
   row PROBLEM alerts "$(wc -l < "$GB_STATE/ALERT") open; newest: $(tail -1 "$GB_STATE/ALERT" | cut -c1-140). Fix the cause, then ./status.sh --ack"
 else row OK alerts "none open"; fi
+channel_names=$(alert_channels)
+if [[ -z "$channel_names" ]]; then
+  if [[ "$ALERT_CHANNEL_REQUIRED" == 0 ]]; then row OK "alert channel" "disabled on purpose"
+  else row WARN "alert channel" "NO ALERT CHANNEL: failures are only written to state/ALERT and logs, nobody is told. Set ALERT_NTFY_URL, ALERT_WEBHOOK_URL or ALERT_HOOK in config.env (docs/health-and-alerts.md), then run ./test-alert.sh"; fi
+elif [[ "$(kv_get "$GB_STATE/alert-delivery.status" result)" == failed ]]; then
+  row WARN "alert channel" "last alert delivery FAILED $(ago "$(kv_epoch "$GB_STATE/alert-delivery.status" time)"); see logs/alert-hook.log, run ./test-alert.sh"
+elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" == failed ]]; then
+  row WARN "alert channel" "configured ($channel_names), last alert test FAILED; see logs/alert-hook.log, run ./test-alert.sh"
+elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" != ok ]]; then
+  row OK "alert channel" "configured ($channel_names), not tested yet: run ./test-alert.sh"
+else row OK "alert channel" "configured ($channel_names), test passed"; fi
 [[ -f "$GB_STATE/PAUSE" ]] && row WARN paused "state/PAUSE exists: the scheduler starts no jobs (rm state/PAUSE to resume)"
 [[ -e "$GUARD_LATCH" ]] && row PROBLEM "stale guard" "latch set ($(cut -d' ' -f2- "$GUARD_LATCH" 2>/dev/null | cut -c1-120)); forget/prune blocked until a good hourly backup; see REBUILD.md, never --force blindly"
 [[ -e "$SQLITE_LATCH" ]] && row WARN "sqlite staging" "latch set since $(at "$(epochf "$SQLITE_LATCH")"): a consistent-copy run failed; forget/prune blocked until a fully clean hourly backup"
