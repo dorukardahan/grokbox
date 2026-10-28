@@ -1,7 +1,7 @@
 # Privacy Policy - Grok Box
 
 Applies to the open-source software at https://github.com/dorukardahan/grokbox ("Grok Box") and to the
-Google OAuth client you create to run it. Last updated: 2026.
+Google OAuth client you create to run it. Last updated: 2026-10-28.
 
 - **Who runs it.** Grok Box runs only on the machine (the "box") of the person who installs it. There is no Grok Box
   server, account or hosted service, and the authors operate no backend.
@@ -15,6 +15,17 @@ Google OAuth client you create to run it. Last updated: 2026.
 - **Credentials.** OAuth tokens, the client secret and the restic password file are stored on your box with owner-only
   permissions. With `BACKUP_SECRETS=1` (default) credential files other than the restic password are also inside the
   encrypted backup; set `BACKUP_SECRETS=0` to leave them out.
+- **Conversations and voice content.** If you use the optional server-side export (the GrokBox-Main and
+  GrokBox-Assist bots), your bots' conversation transcripts, including the text of voice calls as it
+  appears in those transcripts, and a sample of the shared memory are written to the box under
+  `staging/server-export/` and from there into the encrypted backup. Anything you or anyone else pasted
+  into a chat, secrets included, is therefore in the exports and in the backups. There is no redaction.
+  To turn it off, do not set up the two bots (or delete their routines). To remove the data, delete
+  `staging/server-export/`; snapshots that were taken earlier keep their copies until those snapshots are
+  forgotten and pruned (by the normal retention, or by hand with `restic forget` + `restic prune`, see the
+  restic documentation), and with `PRUNE_USE_TRASH=1` the pruned files stay in the Drive trash for about
+  30 days. Independently of the export, any conversation data the platform keeps as files on the box
+  (under the backup roots) is backed up like every other file.
 - **Retention and deletion.** Retention automatically deletes old snapshots according to your config (`KEEP`,
   `KEEP_QUICK`). By default those deleted files go to the Drive trash, where they stay recoverable for about 30 days and
   count against your Drive quota until Google empties the trash; set `PRUNE_USE_TRASH=0` to delete them at once. Remaining data stays in your Drive until you delete the backup folder

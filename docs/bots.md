@@ -17,6 +17,7 @@ the backup too, and a broken or missed Main run gets noticed.
 `scheduler.sh`, cron and shell scripts cannot call them. Never use cookies, scraped tokens or internal APIs
 instead. Scheduled runs lack ReadTranscript and cannot talk to the owner: every run must return
 the template's explicit handoff to its parent chat, which pulls pages and reports only problems.
+The tools and result formats the bots rely on are listed in [platform-contract.md](platform-contract.md).
 
 ## What each bot can reach
 - `ReadTranscript {in: <agent id>}` returns any of the owner's bots, including the primary bot's main chat

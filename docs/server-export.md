@@ -8,6 +8,7 @@ memory with RecallMemory and always hand off to their parent chats. Those chats 
 `server-export-merge.py` merges them into `staging/server-export/`, which every snapshot already includes.
 GrokBox-Main exports every bot except itself; GrokBox-Assist exports Main and the primary bot's main chat.
 The script takes a lock, so both bots may run it at the same time.
+The tool result formats and platform paths it relies on are listed in [platform-contract.md](platform-contract.md).
 
 ## Layout (dirs 700, files 600)
 | path | what |
@@ -16,7 +17,7 @@ The script takes a lock, so both bots may run it at the same time.
 | `state/positions.json` | per id: name, server total, highest exported position, exported byte length, lines, last export, pending pages, warnings |
 | `state/pending/<id>/<A>-<B>.jsonl` | pages not yet contiguous with what is exported |
 | `INDEX.md` | name, id, counts, last export, status (`complete`, `empty`, `not readable`, `gap`) |
-| `memory/<name>.md` | deduplicated RecallMemory facts per bot (`grokbox-main-and-shared`, `grokbox-assist-and-shared`, `primary-bot-private`); only grows |
+| `memory/<name>.md` | deduplicated RecallMemory facts per bot, a **sample** (see "Memory export is a sample") (`grokbox-main-and-shared`, `grokbox-assist-and-shared`, `primary-bot-private`); only grows |
 | `state/replaced/` | originals kept by `repair` (history of a renamed bot that older versions split into two files) |
 
 Set `SERVER_EXPORT_DIR` to write elsewhere and `AGENTS_DIR` if the agents live somewhere other than
@@ -36,7 +37,7 @@ mid-write never leaves a half-written line or a duplicated page behind.
 ## Daily routines
 The ready-to-paste prompts are [routine-main.md](routine-main.md) (scheduled health + memory + handoff; parent chat exports all other bots) and
 [routine-assist.md](routine-assist.md) (scheduled health + memory + handoff; parent chat exports Main + the primary chat and watches Main). Setup:
-[../AGENTS.md](../AGENTS.md) step 8. Store only each template's **Scheduled run** prompt in UpdateRoutine.
+[../AGENTS.md](../AGENTS.md) step 10. Store only each template's **Scheduled run** prompt in UpdateRoutine.
 Every run returns its explicit EXPORT NOT DONE handoff, even when healthy. Steps 1–3 below run in
 the **parent chat**, never the scheduled run; steps 4–6 can run in the schedule. After paging, the
 chat checks INDEX.md and requires `./export-freshness.sh` to print OK. Only problems go to the owner.
@@ -61,7 +62,7 @@ The shared steps:
    then ingest only those new result files (step 2). Repeat until `ingest_rc=0` and `{}`. For long
    backlogs you may fire `before: N, N-35, N-70, ...` in parallel; overlaps are de-duplicated and any
    gap reappears in the output. Stop after 30 rounds and report if not done.
-4. `RecallMemory` with generic queries, then
+4. `RecallMemory` with generic queries (a sample, not a full dump: see below), then
    `server-export-merge.py memory --remove --out <bot>-and-shared --label <bot> <files>` (at most ~15 facts per query).
    Use `write_to_file: true` if the tool offers it. Some bots' RecallMemory has no such option and returns the
    result inline: then paste each result **verbatim** into a file with a quoted heredoc (one Shell call per
@@ -74,6 +75,19 @@ The shared steps:
 
 A bot that is renamed keeps one file: the transcript file is renamed to the new slug. `repair` merges files
 that older versions split; it keeps the originals in `state/replaced/`.
+
+## Memory export is a sample
+The memory export is **not** a complete dump of a bot's memory. Each run asks `RecallMemory` a fixed
+set of generic queries (GrokBox-Main about 10, GrokBox-Assist 3-5; see the routine templates) and stores
+whatever comes back, at most ~15 facts per query. Facts that no query happens to match are not in the
+export. The files only grow (deduplicated, never pruned), so coverage improves over time, but a fact can
+be missing. Keep anything important in a file under the backup roots too: those files are in every snapshot.
+
+## Voice conversations
+Voice calls happen on the platform's servers. As far as we have checked, a voice call shows up in the
+bot's chat transcript like other messages, so the daily transcript export picks it up with the next
+daily export (up to ~24 h later). Unknown: whether the stored text is verbatim or a summary, and how long
+the server keeps it. Grok Box does not export audio.
 
 ## What it cannot reach
 - a bot's own running conversation (that is why there are two bots), and subagent runs;

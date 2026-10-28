@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest a change or a new feature.
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For bigger changes, please describe the plan here before writing code (see CONTRIBUTING.md).
+        Keep examples fake: `bot-a`, `abcdef12`, `you@example.com`.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What should Grok Box do? New settings need a safe default that keeps old config.env files working.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives you considered
+    validations:
+      required: false
+  - type: dropdown
+    id: pr
+    attributes:
+      label: Would you send a pull request?
+      options:
+        - "Yes"
+        - Maybe, with some guidance
+        - "No"
+    validations:
+      required: true
