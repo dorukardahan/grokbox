@@ -22,6 +22,7 @@ else
   if ! flock -w "$WAIT" 9; then
     problem=$(lock_problem); [[ -z "$problem" ]] || alert "$problem"
     log "$MODE: another backup/check is running; skip"; exit 0; fi
+  rm -f "$GB_STATE"/snapshot-list.* "$GB_STATE"/promote-list.* "$GB_STATE"/promote-error.* "$GB_STATE"/promote-tag.*
   took_lock "$MODE"
   if [[ $MODE == auto ]]; then
     STARTED=$(date +%s); RESULT=failed; SNAPSHOT=""; FILES=0; BYTES=0; ADDED=0; UNREADABLE=0
@@ -52,7 +53,9 @@ prev="$GB_STATE/manifest-last-good.json"
 remote_prev="$GB_STATE/manifest-remote.json"
 PARENT=()
 if [[ $DRY == 0 ]]; then   # prefer the repo's last snapshot (local state may itself be rolled back)
-  if R snapshots --host "$BACKUP_HOST" --json > "$GB_STATE/snapshots.json.tmp" 2>>"$LOG"; then
+  list_err=$(mktemp "$GB_STATE/snapshot-list.XXXXXX")
+  if snapshot_list "$GB_STATE/snapshots.json.tmp" "$list_err" --host "$BACKUP_HOST" --json; then
+    rm -f "$list_err"
     mv "$GB_STATE/snapshots.json.tmp" "$GB_STATE/snapshots.json"
     rm -f "$remote_prev"
     python3 - "$GB_STATE/snapshots.json" > "$remote_prev" <<'PY' || true
@@ -77,7 +80,10 @@ PY
     [[ -n "$pid" ]] && PARENT=(--parent "$pid")
   else
     rm -f "$GB_STATE/snapshots.json.tmp"
-    alert "$MODE: cannot list snapshots on $RESTIC_REPOSITORY (Drive/auth problem?); backup NOT run"; exit 7
+    if restic_lock_error "$list_err"; then
+      alert "$MODE: repository is locked (stale lock?) so snapshots could not be listed; backup NOT run"
+    else alert "$MODE: cannot list snapshots on $RESTIC_REPOSITORY (Drive/auth problem?); backup NOT run"; fi
+    rm -f "$list_err"; exit 7
   fi
 fi
 verdict=$(python3 - "$cur" "$prev" "$GUARD_MAX_DROP_PCT" "$GUARD_MTIME_BACK_HOURS" <<'PY'
@@ -170,21 +176,75 @@ if [[ $rc == 3 && "${summary[0]:-}" != warnings ]]; then
   alert "restic backup ($MODE) created an INCOMPLETE snapshot; excluded from complete-snapshot retention (kept for 7 days); last-success unchanged. Unreadable paths (up to 20): ${summary[6]:-unknown; see log}"
   exit 6
 fi
-promoted=0
+# A tag rewrite changes the ID; resolve against the backup ID and its original field each time.
+backup_id="$SNAPSHOT"
+promote_list=$(mktemp "$GB_STATE/promote-list.XXXXXX")
+promote_err=$(mktemp "$GB_STATE/promote-error.XXXXXX")
+tag_out=$(mktemp "$GB_STATE/promote-tag.XXXXXX")
+resolve_promotion() {
+  snapshot_list "$promote_list" "$promote_err" --host "$BACKUP_HOST" --json || return 1
+  python3 - "$promote_list" "$backup_id" "$MODE" 2>>"$LOG" <<'PYPROMOTE'
+import json,sys
+snaps=json.load(open(sys.argv[1])); anchor=sys.argv[2]; mode=sys.argv[3]
+def matches(value):
+    return bool(value and anchor) and (value.startswith(anchor) or anchor.startswith(value))
+selected=None; best=3
+for snap in snaps:
+    if matches(snap.get("id")) or matches(snap.get("original")):
+        tags=snap.get("tags") or []
+        rank=0 if mode in tags and "incomplete" not in tags else 1 if "incomplete" in tags else 2
+        if rank < best:
+            selected=snap; best=rank
+if selected:
+    print(("promoted", "incomplete", "unverified")[best], selected["id"], selected.get("short_id") or selected["id"][:8])
+else:
+    print("missing")
+PYPROMOTE
+}
+promoted=0; promotion_failure="snapshot missing"; current_id="$SNAPSHOT"
 if [[ -n "$SNAPSHOT" ]]; then
   for attempt in 1 2; do
-    if R tag --remove incomplete --add "$MODE" "$SNAPSHOT" >>"$LOG" 2>&1; then promoted=1; break; fi
-    log "backup ($MODE): snapshot promotion attempt $attempt failed"
+    promoted_id=""; state=unknown
+    if [[ $attempt != 1 ]] && resolved=$(resolve_promotion); then
+      read -r state resolved_id promoted_id <<<"$resolved"
+      [[ -z "$resolved_id" ]] || current_id="$resolved_id"
+    fi
+    : > "$tag_out"
+    if [[ $state == promoted ]]; then
+      promoted=1
+    elif [[ $state != missing && $state != unverified ]]; then
+      tag_rc=0
+      R tag --retry-lock "$PROMOTE_LOCK_WAIT" --remove incomplete --add "$MODE" "$current_id" >"$tag_out" 2>&1 || tag_rc=$?
+      cat "$tag_out" >>"$LOG"
+      if [[ $tag_rc == 0 ]]; then
+        promotion_failure="snapshot could not be verified as promoted (restic tag reported success but the snapshot is still tagged incomplete or missing)"
+        if resolved=$(resolve_promotion); then
+          read -r state resolved_id promoted_id <<<"$resolved"
+          [[ -z "$resolved_id" ]] || current_id="$resolved_id"
+          [[ $state != promoted ]] || promoted=1
+        fi
+      elif restic_lock_error "$tag_out"; then promotion_failure="repository is locked"
+      else promotion_failure="restic tag failed rc=$tag_rc"; fi
+    else promotion_failure="snapshot could not be verified as promoted (snapshot incomplete, missing or without $MODE tag)"; fi
+    if [[ $promoted == 1 ]]; then
+      if [[ -n "$promoted_id" ]]; then SNAPSHOT="$promoted_id"
+      else log "backup ($MODE): promoted snapshot ID lookup failed; result retains pre-tag ID $SNAPSHOT"; fi
+      break
+    fi
+    log "backup ($MODE): snapshot promotion attempt $attempt failed: $promotion_failure"
+    if [[ $attempt == 1 ]]; then
+      unlock_rc=0
+      R unlock >>"$LOG" 2>&1 || unlock_rc=$?
+      log "backup ($MODE): plain restic unlock ran rc=$unlock_rc"
+      alert "backup ($MODE): promotion was blocked/failed; plain restic unlock (stale locks only) was run before retrying (rc=$unlock_rc)"
+    fi
   done
 fi
+rm -f "$promote_list" "$promote_err" "$tag_out"
 if [[ $promoted != 1 ]]; then
   RESULT=incomplete; date +%s > "$GB_STATE/last-partial"
-  alert "backup ($MODE): could not promote snapshot to complete; retention skipped"; exit 6
+  alert "backup ($MODE): could not promote snapshot to complete; retention skipped; $promotion_failure"; exit 6
 fi
-# Tagging changes the snapshot id; prefer the promoted id when the lookup succeeds.
-if promoted_id=$(R snapshots --host "$BACKUP_HOST" --tag "$MODE" --latest 1 --json 2>>"$LOG" | python3 -c 'import json,sys;s=json.load(sys.stdin);print(s[-1]["short_id"] if s else "")') && [[ -n "$promoted_id" ]]; then
-  SNAPSHOT="$promoted_id"
-else log "backup ($MODE): promoted snapshot ID lookup failed; result retains pre-tag ID $SNAPSHOT"; fi
 RESULT=complete
 if [[ $rc == 3 ]]; then
   log "backup ($MODE) complete with warnings: persistently unreadable regular files omitted (up to 20): ${summary[6]}"

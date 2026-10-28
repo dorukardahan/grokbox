@@ -20,8 +20,8 @@ trap 'rm -rf "$W"' EXIT
 SNAP="$W/snapshot.json"; STATS="$W/stats.json"
 if [[ -s "$RESTIC_PASSWORD_FILE" ]] && { ! is_rclone_repo || [[ -s "$RCLONE_CONFIG" ]]; }; then
   # newest hourly snapshot (its summary carries files/bytes/added/duration) + raw repository size; both optional
-  R snapshots --host "$BACKUP_HOST" --tag auto --latest 1 --json > "$SNAP.tmp" 2>/dev/null && mv "$SNAP.tmp" "$SNAP"
-  R stats --mode raw-data --json > "$STATS.tmp" 2>/dev/null && mv "$STATS.tmp" "$STATS"
+  R snapshots --no-lock --host "$BACKUP_HOST" --tag auto --latest 1 --json > "$SNAP.tmp" 2>/dev/null && mv "$SNAP.tmp" "$SNAP"
+  R stats --no-lock --mode raw-data --json > "$STATS.tmp" 2>/dev/null && mv "$STATS.tmp" "$STATS"
 fi
 nalerts=0; [[ -s "$GB_STATE/ALERT" ]] && nalerts=$(wc -l < "$GB_STATE/ALERT")
 python3 - "$GB_STATE" "$SNAP" "$STATS" "$BACKUP_HOST" "$nalerts" "${TEST_RESTORE_WEEKDAY:-}" > "$W/report.txt" <<'PY'

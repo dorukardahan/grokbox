@@ -43,3 +43,13 @@ Drive consent holds the backup lock and edits a private candidate config. The
 original config is copied and byte-compared before consent. Verification retries
 three times; folder-creation failure is explicit. Only a verified candidate is
 atomically installed. `--test` never cleans up a concurrent consent flow's files.
+
+## Snapshot promotion and stale locks
+
+Promotion waits up to `PROMOTE_LOCK_WAIT` (default `2m`) for an exclusive lock.
+After the first failure it runs one plain `restic unlock` (stale locks only),
+raises an alert, and retries once with the snapshot's current ID.
+Success requires verifying that `incomplete` is gone and `auto` or `quick` is present.
+Read-only snapshot, file and size listings use `--no-lock`.
+Backup snapshot listings retry once after `SNAPSHOT_LIST_RETRY_S` (default `5` seconds).
+Each restic call logs its caller, wrapper, PID and arguments to the monthly log.

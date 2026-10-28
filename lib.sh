@@ -15,6 +15,7 @@ source "$GB_CONFIG"
 : "${QUOTA_ALERT_PCT:=90}" "${LOG_RETENTION_DAYS:=0}" "${RESTORE_LOCK_WAIT:=600}"
 : "${ALERT_HOOK:=}" "${ALERT_HOOK_TIMEOUT:=60}" "${ALERT_DEDUPE_HOURS:=24}" "${DRIVE_REPORT:=1}"
 : "${EXPORT_MISSED_HOURS:=26}"
+: "${PROMOTE_LOCK_WAIT:=2m}" "${SNAPSHOT_LIST_RETRY_S:=5}"
 : "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
 [[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
 [[ -v EXPECTED_BOTS ]] || EXPECTED_BOTS=()
@@ -132,9 +133,34 @@ fi
 # Exit code 124 = timed out.
 _rt() { local t="${R_TIMEOUT:-${RESTIC_TIMEOUT:-3h}}"
   if [[ "$t" == 0 ]]; then "$@"; else timeout -k 60 "$t" "$@"; fi; }
-R()  { _rt "$GB_BIN/restic" "${RESTIC_OPTS[@]}" "$@"; }
-RT() { _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" "$@"; }   # forget/prune (Drive trash)
+# File-only diagnostics; logging must never affect a restic call's streams or result.
+_restic_call_log() {
+  local wrapper="$1" caller="${BASH_SOURCE[2]:-$0}" function="${FUNCNAME[2]:-main}"; shift
+  caller="${caller##*/}"
+  {
+    printf '[%s] restic call: caller=%s:%s pid=%s ppid=%s wrapper=%s cmd=' \
+      "$(date '+%F %T %Z')" "$caller" "$function" "$$" "$PPID" "$wrapper"
+    printf '%q ' "$@"; printf '\n'
+  } 2>/dev/null >>"$LOG" || true
+}
+R()  { _restic_call_log R "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS[@]}" "$@"; }
+RT() { _restic_call_log RT "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" "$@"; }   # forget/prune (Drive trash)
 RCL() { timeout -k 30 "${RCLONE_TIMEOUT:-300}" "$GB_BIN/rclone" --config "$RCLONE_CONFIG" "$@"; }
+
+restic_lock_error() { grep -qi 'repository is already locked' "$1"; }
+# Retry a transient read once; keep only the final attempt's output and error for the caller.
+snapshot_list() {  # snapshot_list OUTPUT ERROR [snapshots flags...]
+  local out="$1" err="$2" attempt rc; shift 2
+  for attempt in 1 2; do
+    rc=0
+    R snapshots --no-lock "$@" >"$out" 2>"$err" || rc=$?
+    cat "$err" >>"$LOG"
+    (( rc == 0 )) && return 0
+    (( rc == 124 || rc == 137 )) && return "$rc"   # timed out: do not double the wait while holding the lock
+    [[ $attempt == 2 ]] || sleep "$SNAPSHOT_LIST_RETRY_S"
+  done
+  return "$rc"
+}
 
 # Paths that go into a snapshot: the roots, plus each of staging, the config file, state/rebuild-kit
 # and (BACKUP_SECRETS=1) the secrets dir that sits outside all roots. Each is checked on its own.
@@ -281,7 +307,7 @@ SQLITE_LATCH="$GB_STATE/SQLITE_FAILED"
 # Older releases left auto/quick on incomplete snapshots. Remove those retention tags first.
 prepare_retention() {
   local ids id
-  ids=$(R snapshots --host "$BACKUP_HOST" --tag incomplete --json | python3 -c 'import json,sys;print("\n".join(s["id"] for s in json.load(sys.stdin) if set(s.get("tags") or []) & {"auto","quick"}))') || return 1
+  ids=$(R snapshots --no-lock --host "$BACKUP_HOST" --tag incomplete --json | python3 -c 'import json,sys;print("\n".join(s["id"] for s in json.load(sys.stdin) if set(s.get("tags") or []) & {"auto","quick"}))') || return 1
   while IFS= read -r id; do
     [[ -z "$id" ]] || R tag --remove auto,quick "$id" >>"$LOG" 2>&1 || return 1
   done <<< "$ids"
