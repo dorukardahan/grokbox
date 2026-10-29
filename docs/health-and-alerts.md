@@ -18,9 +18,13 @@ upload, expected bots. Ends with `Overall: OK | WARN | PROBLEM`.
 
 | doctor row | what it shows |
 |---|---|
-| hourly slots | Missed completed local clock hours in `HOURLY_SLOT_WINDOW_H` (default 24), capped by first start; WARN at `HOURLY_MISS_WARN` (default 1), naming up to six hours. Complete hourly successes keep the latest 400 entries in `state/hourly-history`. |
+| hourly slots | Missed completed local clock hours in `HOURLY_SLOT_WINDOW_H` (default 24), capped by the later of first start and the earliest recorded history entry; WARN at `HOURLY_MISS_WARN` (default 1), naming up to six hours. Complete hourly successes keep the latest 400 entries in `state/hourly-history`. |
 | quick chain | WARN after the greater of two hours or three quick intervals without a success; disabled when `QUICK_EVERY_MIN=0`. The first quick backup has two hours of grace. |
 | skipped backup | WARN when an hourly run gave up waiting for the lock after the last success; shows the time and holder. The next hourly run retries. |
+
+On upgrades, missing or empty hourly history with a recorded complete backup shows `OK: history starting`.
+Only full clock hours after history recording began (or first start, if later) count as expected slots.
+Gaps after that point still warn; the last backup row independently reports stale successes.
 
 The last check row warns with the prune skip reason and its age, becoming PROBLEM after
 `PRUNE_SKIP_PROBLEM_DAYS` (default 3) consecutive days. A successful prune clears that age.
