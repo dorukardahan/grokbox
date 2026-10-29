@@ -28,6 +28,10 @@ is the only supported version.
 - PRIVACY.md: conversations and voice content in the server-side export, and how to stop or remove it.
 
 ### Changed
+- Docs: GrokBox-Assist's routine now runs twice a day (one routine, two times, e.g. `0 9,21 * * *`)
+  instead of once. Main's export row is refreshed only through Assist's handoff, so this gives about
+  14 h of slack for one delayed handoff, while a fully missed day still alerts at the unchanged
+  26 h `EXPORT_MISSED_HOURS` limit. No script changes.
 - AGENTS.md steps renumbered: the bot setup is now step 10 and "Finish" step 12 (step 3, the restic
   password, keeps its number because `status.sh` and `doctor.sh` refer to it). References in
   `REBUILD.md` and `docs/server-export.md` updated.

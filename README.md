@@ -81,7 +81,7 @@ flowchart TB
   P[your primary bot] -->|setup: CreateAgent + SendToAgent| M & A
   M[GrokBox-Main<br/>daily, e.g. 05:15] -->|install.sh --schedule, status.sh, alerts| BOX[box backup<br/>scheduler + restic]
   M -->|parent chat ReadTranscript: every bot except itself<br/>RecallMemory| X[staging/server-export/<br/>transcripts + memory + INDEX.md]
-  A[GrokBox-Assist<br/>daily, e.g. 09:00] -->|parent chat ReadTranscript: GrokBox-Main<br/>+ primary main chat| X
+  A[GrokBox-Assist<br/>twice a day, e.g. 09:00 and 21:00] -->|parent chat ReadTranscript: GrokBox-Main<br/>+ primary main chat| X
   A -.checks Main ran, covers a missed run.-> M
   M -.checks Assist ran.-> A
   X --> BOX

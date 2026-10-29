@@ -1,4 +1,4 @@
-# GrokBox-Assist daily routine (health + handoff, watches Main)
+# GrokBox-Assist twice-daily routine (health + handoff, watches Main)
 
 GrokBox-Assist creates its routine with `UpdateRoutine`, a few hours after Main. Scheduled runs
 have RecallMemory but no ReadTranscript and cannot talk to the owner. They always hand transcript
@@ -9,11 +9,20 @@ exports, and reports only problems. Background: [bots.md](bots.md).
 Same as [routine-main.md](routine-main.md): `<REPO>`, `<AGENTS_DIR>`, `<DRIVE_ACCOUNT>`, `<REMOTE>`,
 `<LANGUAGE>`, `<MAIN_ID>`, `<ASSIST_ID>`, `<PRIMARY_ID>`, `<RESULT_DIR>`. In addition:
 - `<MAIN_HOUR>`: when Main runs.
-- `<HOUR>`: when this routine runs, e.g. `09:00` if Main runs at `05:15`.
+- `<HOUR>`: when this routine runs first, e.g. `09:00` if Main runs at `05:15`.
+- `<HOUR2>`: its second run, about 12 hours after `<HOUR>`, e.g. `21:00`.
 
 ## Routine settings
 - **Name:** `GrokBox-Assist daily: health + handoff, watch Main`
-- **Schedule:** daily at `<HOUR>` (owner's time zone), at least 2 hours after `<MAIN_HOUR>`.
+- **Schedule:** one routine with two times a day, `<HOUR>` and `<HOUR2>` (owner's time zone), e.g. the single
+  cron `0 9,21 * * *`. `<HOUR>` is at least 2 hours after `<MAIN_HOUR>`. Do not create a second routine:
+  if a Grok Box routine already exists, update it (one routine, two times).
+- **Why twice:** Main's own row is refreshed only by Assist's parent chat, after a handoff, and a bot cannot
+  export its own conversation. With one run a day, one delayed handoff is enough to pass the 26 h limit
+  (`EXPORT_MISSED_HOURS`, unchanged) and fire export alerts. With runs about 12 h apart, a handoff can be
+  up to about 14 h late with no alert, while a fully missed day still alerts at 26 h.
+- **Twice means twice:** the health and memory steps below run on both runs, so a repeating problem is
+  reported again, in one line (see step 2).
 - **Result:** always return the parent-chat handoff. Only the parent chat reports problems to the owner, in `<LANGUAGE>`.
 
 ## Scheduled run
