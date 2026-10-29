@@ -8,7 +8,7 @@
 #   daily    from DAILY_CHECK_AT, once per day           check.sh (forget both chains + prune + check)
 #   weekly   TEST_RESTORE_WEEKDAY at TEST_RESTORE_AT    test-restore.sh --weekly (sample restore + sha256 compare)
 # First start leaves the weekly slot due. The once run marks the current slot on success, so the next
-# weekly run is at the next due weekday/time. Until any restore succeeds, failed weekly runs unmark
+# weekly run is at the next due weekday/time. Until any restore succeeds, failed first/weekly runs unmark
 # the slot and retry at most once per day; exit 75 (lock busy) retries next minute. Missed slots catch up.
 #   after hourly / check / test restore                  report.sh (latest-backup-report.txt -> Drive), expected-bots.sh
 #   hourly   from minute WATCHDOG_AT_MIN                 watchdog: ALERT if the last HOURLY success (or, before the first one,
@@ -47,7 +47,10 @@ while true; do
     if [[ -f "$GB_STATE/last-success" && ! -f "$GB_STATE/last-test-restore" && ! -f "$GB_STATE/test-restore-attempted" ]]; then
       date +%s > "$GB_STATE/test-restore-attempted"; test_restore_slot > "$GB_STATE/sched-test-restore"
       run "$GB_DIR/test-restore.sh"
-      if (( RC != 0 )) && [[ ! -f "$GB_STATE/last-test-restore" ]]; then rm -f "$GB_STATE/sched-test-restore"; fi
+      if (( RC != 0 )) && [[ ! -f "$GB_STATE/last-test-restore" ]]; then
+        rm -f "$GB_STATE/sched-test-restore"
+        (( RC == 75 )) || echo "$day" > "$GB_STATE/sched-test-restore-retry"
+      fi
       run "$GB_DIR/report.sh"; fi
   elif (( QUICK_EVERY_MIN > 0 && now - $(get sched-quick-at) >= QUICK_EVERY_MIN * 60 - 30 \
           && now - $(get sched-backup-at) >= 600 )); then
