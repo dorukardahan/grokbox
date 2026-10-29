@@ -134,12 +134,14 @@ Steps:
    personas in [docs/bots.md](docs/bots.md), with `<REPO>`, `<LANGUAGE>`, `<MAIN_ID>` and `<PRIMARY_ID>`
    filled in. `<PRIMARY_ID>` is your own agent id; create Main first so that you know `<MAIN_ID>`. Note both
    new ids. If bots with these names already exist, reuse them instead of creating duplicates.
-2. **Pick staggered times** in the user's time zone, for example Main 05:15 and Assist 09:00. Keep them
-   away from `check.sh` (04:40 by default) and at least 2 hours apart.
+2. **Pick staggered times** in the user's time zone, for example Main 05:15 and Assist 09:00 and 21:00
+   (Assist runs twice a day so that one delayed handoff does not alert on Main's export row). Keep them
+   away from `check.sh` (04:40 by default) and Main and Assist's first run at least 2 hours apart.
 3. **Brief each bot** with your `SendToAgent` tool, using the setup briefs in [docs/bots.md](docs/bots.md),
    filled in. Each bot then:
    - reads its template ([docs/routine-main.md](docs/routine-main.md) or [docs/routine-assist.md](docs/routine-assist.md));
-   - **creates its own daily routine with its `UpdateRoutine` tool**;
+   - **creates its own routine with its `UpdateRoutine` tool** (Main once a day, Assist twice a day, one
+     routine each);
    - **runs the first full export right away in its normal chat, not in the scheduled routine**.
      Main exports all bots except itself; Assist exports Main and your main chat.
    They reply with a short status. Do not paste conversation content anywhere.

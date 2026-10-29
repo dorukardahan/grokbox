@@ -6,7 +6,7 @@ creates them and keeps **no** backup routine of its own.
 | bot | parent chat | scheduled routine |
 |---|---|---|
 | **GrokBox-Main** | exports every non-deleted bot except itself, reports health/export problems | health + memory + mandatory handoff; [routine-main.md](routine-main.md), e.g. 05:15 |
-| **GrokBox-Assist** | exports Main + primary chat, covers stale bots; alerts before exporting its own row if Main missed a day | health + memory + age checks + mandatory handoff; [routine-assist.md](routine-assist.md), e.g. 09:00 |
+| **GrokBox-Assist** | exports Main + primary chat, covers stale bots; alerts before exporting its own row if Main missed a day | health + memory + age checks + mandatory handoff, twice a day; [routine-assist.md](routine-assist.md), e.g. 09:00 and 21:00 |
 
 **Why two bots?** A bot cannot export the conversation it is in. Its own transcript is still being
 written, and the ReadTranscript call for its own id only returns the current run. So each bot exports the
@@ -92,8 +92,11 @@ Setup brief from the owner's primary bot. Grok Box is installed at <REPO> and ba
 Setup brief from the owner's primary bot. Grok Box is installed at <REPO>. GrokBox-Main (<MAIN_ID>) does
 the backups; you cover Main's own conversation and the primary bot's main chat (<PRIMARY_ID>), and watch Main.
 1. Read <REPO>/docs/routine-assist.md. Fill in its placeholders with: REPO=<REPO>, AGENTS_DIR=<AGENTS_DIR>, RESULT_DIR=<RESULT_DIR>,
-   DRIVE_ACCOUNT=<DRIVE_ACCOUNT>, REMOTE=<REMOTE>, LANGUAGE=<LANGUAGE>, MAIN_ID=<MAIN_ID>, PRIMARY_ID=<PRIMARY_ID>, ASSIST_ID=<ASSIST_ID>, MAIN_HOUR=<MAIN_HOUR>, HOUR=<ASSIST_HOUR>.
-2. Create your own daily routine with UpdateRoutine: daily at <ASSIST_HOUR> (owner's time zone), with only the Scheduled run prompt.
+   DRIVE_ACCOUNT=<DRIVE_ACCOUNT>, REMOTE=<REMOTE>, LANGUAGE=<LANGUAGE>, MAIN_ID=<MAIN_ID>, PRIMARY_ID=<PRIMARY_ID>, ASSIST_ID=<ASSIST_ID>, MAIN_HOUR=<MAIN_HOUR>, HOUR=<ASSIST_HOUR>, HOUR2=<ASSIST_HOUR2>.
+2. Create your own routine with UpdateRoutine: one routine that runs twice a day, at <ASSIST_HOUR> and <ASSIST_HOUR2> (e.g. cron "0 9,21 * * *", owner's time zone), with only the Scheduled run prompt.
+   If you already have a Grok Box routine, update it instead of adding another.
+   Why twice: one delayed handoff must not alert on Main's export row, while a fully missed day still does (26 h limit).
+   The health and memory steps run on both runs, so a repeating problem is reported again, in one line.
 3. Run the Parent chat export loop in this normal chat now, not in the routine (first full export of Main and the primary chat).
 4. Reply to me with: routine created (name, time), the INDEX.md rows for <MAIN_ID> and <PRIMARY_ID>, any problem.
 ```
