@@ -148,13 +148,14 @@ runs a backup, or edits `config.env`. The daily routine, its parent chat, and th
 ### How "new" is decided
 `doctor.sh` exits 0, 1 or 2 for OK, WARN or PROBLEM, so its exit code cannot show a crash. The run treats
 a doctor output without an `Overall:` line as a failure, so a broken doctor never looks like a healthy box.
-The scheduled run collects the open problems into `state/alert-current.tsv`, one line per problem:
+The scheduled run collects the open problems into `alert-current.tsv` in the state directory (`state/`, or `GB_STATE` from `config.env`), one line per problem:
 a key, a tab, and the text. An alert's key is its full `state/ALERT` line, which carries a timestamp.
 A doctor problem's key is its check name, such as `scheduler`, so a changing detail does not repeat it.
-`state/alert-reported` lists the keys already handed to the parent chat. The scheduled run drops
+The doctor row `alerts` is skipped, because the alert lines already cover it.
+`alert-reported` in the same directory lists the keys already handed to the parent chat. The scheduled run drops
 keys that are no longer open, so a problem that comes back is reported again. It adds each new key
 when it prints the problem, so two overlapping handoffs can never hide a problem from each other.
-A `flock` on `state/alert-check.lock` makes two overlapping collections run one after the other.
+A `flock` on `alert-check.lock` there makes two overlapping collections run one after the other.
 The cost is that a handoff the parent chat never acts on is not repeated by this routine. The daily
 routine still lists every open alert, so the owner hears about it within a day.
 
@@ -172,19 +173,21 @@ cd <REPO> || exit 1
 (
 set -eE
 trap 'echo "CHECK FAILED: a command failed at line $LINENO"' ERR
-exec 9> state/alert-check.lock && flock -w 120 9 || { echo "CHECK FAILED: another alert check is still running"; exit 1; }
-./doctor.sh > state/alert-doctor.out 2>&1 || true
-grep -q '^Overall:' state/alert-doctor.out || { echo "CHECK FAILED: doctor.sh printed no Overall line:"; head -c 300 state/alert-doctor.out; exit 1; }
-{ [ -s state/ALERT ] && awk '{print "alert " $0 "\t" $0}' state/ALERT
-  awk -F: '/^PROBLEM/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' state/alert-doctor.out
-} > state/alert-current.tsv
-touch state/alert-reported
-awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' state/alert-current.tsv state/alert-reported > state/alert-reported.new
-mv state/alert-reported.new state/alert-reported
-awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' state/alert-reported state/alert-current.tsv > state/alert-new.tsv
-cut -f1 state/alert-new.tsv >> state/alert-reported
+S=$(bash -c '. ./lib.sh >/dev/null && printf %s "$GB_STATE"')
+test -d "$S"
+exec 9> "$S/alert-check.lock" && flock -w 120 9 || { echo "CHECK FAILED: another alert check is still running"; exit 1; }
+./doctor.sh > "$S/alert-doctor.out" 2>&1 || true
+grep -q '^Overall:' "$S/alert-doctor.out" || { echo "CHECK FAILED: doctor.sh printed no Overall line:"; head -c 300 "$S/alert-doctor.out"; exit 1; }
+{ [ -s "$S/ALERT" ] && awk '{print "alert " $0 "\t" $0}' "$S/ALERT"
+  awk -F: '/^PROBLEM/ && !/^PROBLEM +alerts:/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' "$S/alert-doctor.out"
+} > "$S/alert-current.tsv"
+touch "$S/alert-reported"
+awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' "$S/alert-current.tsv" "$S/alert-reported" > "$S/alert-reported.new"
+mv "$S/alert-reported.new" "$S/alert-reported"
+awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' "$S/alert-reported" "$S/alert-current.tsv" > "$S/alert-new.tsv"
+cut -f1 "$S/alert-new.tsv" >> "$S/alert-reported"
 echo "--- new problems:"
-cut -f2 state/alert-new.tsv
+cut -f2 "$S/alert-new.tsv"
 )
 2. If any output line starts with "CHECK FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
 ALERT CHECK: nothing new
