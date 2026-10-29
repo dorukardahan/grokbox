@@ -190,10 +190,20 @@ def _overlap(old, new):
 
 
 def memory_context_text(text):
-    """A context-only part, optionally truncated or followed by the system model block."""
+    """A context-only part, optionally truncated or followed by known system blocks."""
+    if not text.startswith('<memory_context>'):
+        return False
     suffix = text.partition('</memory_context>')[2].lstrip()
-    return text.startswith('<memory_context>') and (
-        not suffix or suffix.startswith('<available_subagent_models'))
+    while suffix:
+        block = re.match(r'<(available_subagent_models|teammates)(?:\s[^<>]*)?>', suffix)
+        if not block:
+            # Truncation can replace the teammates opening tag with an elision marker.
+            return re.fullmatch(r'\.\.\.[^<]*</teammates>', suffix.rstrip()) is not None
+        _, closing, suffix = suffix[block.end():].partition(f'</{block[1]}>')
+        if not closing:
+            return True  # The final system block was truncated.
+        suffix = suffix.lstrip()
+    return True
 
 
 def transcript_key(line):

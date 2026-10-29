@@ -93,10 +93,15 @@ an ordinary matching line. A refreshed duplicate of a trailing volatile line can
 volatile line after a match ending in an ordinary line is kept. A memory-context-only match is
 never sufficient for that fallback. Only user messages consisting entirely of text parts that
 each start with `<memory_context>` are volatile, and each part must either have no closing
-`</memory_context>` (truncated), or have only whitespace after its first closing tag, or have
-text starting with `<available_subagent_models` after leading whitespace there. A closing tag
-followed by other text (such as a user question) makes the whole message ordinary, as do mixed
-parts; these messages are compared exactly as canonical JSON.
+`</memory_context>` (truncated), or have only whitespace and zero or more system blocks after
+its first closing tag. Each block must be `<NAME ...>...</NAME>`, with NAME exactly
+`available_subagent_models` or `teammates`, and ends at its first matching closing tag.
+An unclosed final block consumes the rest of the part. After these blocks, an elided suffix
+starting with `...` and ending (ignoring trailing whitespace) with `</teammates>` is also
+allowed if it contains no other `<` characters. Otherwise, only whitespace may occur outside
+these blocks; any other text (such as a user question after a closed block) or an unknown
+block name makes the whole message ordinary, as do mixed parts. These messages are compared
+exactly as canonical JSON.
 
 Always run `dedupe --dry-run` first and check the reported line ranges against the warning's
 time/position before applying cleanup. A genuine exact repeat anywhere in a flagged transcript

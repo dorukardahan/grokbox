@@ -261,9 +261,17 @@ for parts in [[], [{'type': 'image', 'text': '<memory_context>image'}],
     assert mod.transcript_key(line) == mod.canon(line)
 assert mod.transcript_key(mixed) == mod.canon(mixed)
 assert mod.transcript_key(message('<memory_context>a', '<memory_context>b')) is None
-# Closed context may include the system block in the same part; truncation is also volatile.
+# Closed context may include known system blocks; truncation is also volatile.
+models = '<available_subagent_models>synthetic</available_subagent_models>'
+teammates = '<teammates name="synthetic">fixture</teammates>'
+elided = '...\n- synthetic teammate\n</teammates>'
+models_attrs = '<available_subagent_models version="synthetic">fixture</available_subagent_models>'
 for tail in ['', '</memory_context>', '</memory_context> \n\t',
-             '</memory_context> \n<available_subagent_models>synthetic</available_subagent_models>']:
+             *('</memory_context> \n' + blocks for blocks in [
+                 models, models + '\n\t' + teammates, teammates,
+                 models_attrs + '\n' + elided, models_attrs + '\n' + elided + ' \n\t',
+                 '<available_subagent_models version="synthetic">truncated',
+                 models + '\n<teammates>truncated'])]:
     old, new = message('<memory_context>old' + tail), message('<memory_context>new' + tail)
     assert mod.transcript_key(old) is None
     assert mod.transcript_key(new) is None
@@ -276,7 +284,17 @@ for tail in ['', '</memory_context>', '</memory_context> \n\t',
         assert len(removed) == len(lines) - len(expected)
 cases = [('multipart', message('<memory_context>old', 'earlier user text'), mixed)]
 for i, tail in enumerate(['Question?', ' \nQuestion?',
-                          'Question?</memory_context><available_subagent_models>synthetic']):
+                          'Question?</memory_context><available_subagent_models>synthetic',
+                          models + 'Question?', models + '\n' + teammates + '\nQuestion?',
+                          '<unknown>synthetic</unknown>',
+                          '<available_subagent_models_extra>synthetic',
+                          models + '\nQuestion?\n' + teammates,
+                          models + '\n<unknown>synthetic</unknown>',
+                          *(models_attrs + '\n' + suffix for suffix in [
+                              'Question?', elided[3:], '...\n- synthetic teammate',
+                              '...<unknown>fixture</unknown></teammates>',
+                              '...fixture < literal</teammates>',
+                              elided + '\nQuestion?', elided + '\n' + teammates])]):
     cases.append((f'single-{i}', message('<memory_context>old</memory_context>' + tail),
                   message('<memory_context>new</memory_context>' + tail)))
 for kind, earlier, mixed in cases:
@@ -287,6 +305,7 @@ for kind, earlier, mixed in cases:
     assert mod.memory_overlap([mixed], [mixed]) == 1  # Ordinary content still matches exactly.
     for label, old, new in [('old-tail', a + [earlier], a + [mixed, message('new')]),
                             ('new-middle', a + [mc], a[:2] + [mixed] + a[2:] + [message('new')])]:
+        assert mod.memory_overlap(old, new) == 0, (kind, label)
         base = tmp / f'mixed-{kind}-{label}'
         env = dict(os.environ, SERVER_EXPORT_DIR=str(base), AGENTS_DIR=str(tmp / 'no-agents'),
                    DELETED_BOTS_FILE='')
@@ -299,6 +318,9 @@ for kind, earlier, mixed in cases:
         file, = (base / 'transcripts').glob('*.jsonl')
         assert file.read_text().splitlines() == old + new, (kind, label)
         assert mixed in file.read_text().splitlines(), (kind, label)
+    assert mod.memory_overlap(a + [mc], a + [mixed]) == len(a)
+    lines = [line + '\n' for line in a[:2] + [mixed] + a[2:] + a]
+    assert mod.repeated_blocks(lines) == (''.join(lines), [])
     lines = [line + '\n' for line in a + [mc] + a + [mixed]]
     text, removed = mod.repeated_blocks(lines)
     assert text == '\n'.join(a + [mc, mixed]) + '\n'
