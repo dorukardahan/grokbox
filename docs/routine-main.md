@@ -3,7 +3,8 @@
 GrokBox-Main creates its daily routine with `UpdateRoutine`. The scheduled run checks health and
 exports memory, then always hands transcript paging to its normal (parent) chat. Scheduled runs
 have RecallMemory but no ReadTranscript and cannot talk to the owner. The parent chat reports only
-problems. Partner: [routine-assist.md](routine-assist.md); setup: [bots.md](bots.md).
+problems. A second, hourly routine ([alert check](#alert-check-second-routine-hourly)) tells the owner
+about new alerts the same day. Partner: [routine-assist.md](routine-assist.md); setup: [bots.md](bots.md).
 
 ## Placeholders
 | placeholder | meaning | example |
@@ -15,12 +16,15 @@ problems. Partner: [routine-assist.md](routine-assist.md); setup: [bots.md](bots
 | `<LANGUAGE>` | language for reports | `English` |
 | `<MAIN_ID>` / `<ASSIST_ID>` / `<PRIMARY_ID>` | agent ids of GrokBox-Main, GrokBox-Assist, the primary bot | |
 | `<RESULT_DIR>` | directory for tool result files | `/workspace/agent-tools` |
+| `<ALERT_CRON>` | schedule of the alert check, in the owner's time zone; avoid minutes :40 and :50 | `25 8-23 * * *` |
 | `<HOUR>` | run time in the owner's time zone; keep it away from `check.sh` (04:40) | `05:15` |
 
 ## Routine settings
 - **Name:** `GrokBox-Main daily: backup health + server export`
 - **Schedule:** daily at `<HOUR>`. GrokBox-Assist runs a few hours later.
 - **Result:** always return the parent-chat handoff. Only the parent chat reports problems to the owner, in `<LANGUAGE>`.
+- **Second routine:** `GrokBox-Main alert check`, hourly. See [Alert check](#alert-check-second-routine-hourly).
+  The daily routine stays as it is and keeps its own daily alert report.
 
 ## Step names
 One numbering for both parts, so every step name is unique:
@@ -121,5 +125,90 @@ It must print "daily export OK"; otherwise report the problem to the owner.
 ```
 
 ## First run
-After creating the scheduled routine, run health and memory steps once, and run B1–B3 and the
+After creating both routines, run health and memory steps once, and run B1–B3 and the
 final check in the chat right away. The first export may need many paging rounds; later exports fetch what is new.
+
+## Alert check (second routine, hourly)
+This routine makes GrokBox-Main's chat the default alert channel. A new `state/ALERT` line or a new
+`PROBLEM` row in `doctor.sh` reaches the owner within an hour, with no ntfy app, webhook or `ALERT_HOOK`.
+The scheduler cannot do this itself: only a bot chat can write to the owner. Those three settings stay
+available as extra channels ([health-and-alerts.md](health-and-alerts.md#get-alerts-to-a-human)).
+
+Create it with `UpdateRoutine`, as a second routine next to the daily one. Do not fold it into the daily
+prompt, which runs once a day. Each run only reads. It never acknowledges alerts, restarts the scheduler,
+runs a backup, or edits `config.env`. The daily routine, its parent chat, and the owner do that.
+
+- **Name:** `GrokBox-Main alert check`
+- **Schedule:** `<ALERT_CRON>`, for example `25 8-23 * * *` (every hour from 08:25 to 23:25). Alerts
+  raised overnight arrive at 08:25. Use `25 */2 * * *` to halve the number of runs. The watchdog alerts
+  only after 3 h without a good backup, so a 2-hour cadence still reports a stalled backup the same day.
+- **Result:** always return the handoff below. The parent chat writes to the owner only when the first
+  line says there are new problems.
+
+### How "new" is decided
+`doctor.sh` exits 0, 1 or 2 for OK, WARN or PROBLEM, so its exit code cannot show a crash. The run treats
+a doctor output without an `Overall:` line as a failure, so a broken doctor never looks like a healthy box.
+The scheduled run collects the open problems into `alert-current.tsv` in the state directory (`state/`, or `GB_STATE` from `config.env`), one line per problem:
+a key, a tab, and the text. An alert's key is its full `state/ALERT` line, which carries a timestamp.
+A doctor problem's key is its check name, such as `scheduler`, so a changing detail does not repeat it.
+The doctor row `alerts` is skipped, because the alert lines already cover it.
+`alert-reported` in the same directory lists the keys already handed to the parent chat. The scheduled run drops
+keys that are no longer open, so a problem that comes back is reported again. It adds each new key
+when it prints the problem, so two overlapping handoffs can never hide a problem from each other.
+A `flock` on `alert-check.lock` there makes two overlapping collections run one after the other.
+The cost is that a handoff the parent chat never acts on is not repeated by this routine. The daily
+routine still lists every open alert, so the owner hears about it within a day.
+
+### Alert check scheduled run
+```text
+GrokBox-Main alert check. Repo at <REPO>. Collect new problems for the parent chat, in <LANGUAGE>.
+This run only reads. Always return the handoff below, even when nothing is new.
+Rules: never print secrets (secrets/*, restic password, tokens, auth URLs); never run status.sh --ack,
+install.sh, backup.sh, restore.sh or --force; never edit config.env; never print or summarize
+conversation content; no cookies, scraped tokens or internal APIs; do not change other bots' settings,
+routines or memory. Write only the state files named in step 1.
+
+1. Run exactly this and read its output:
+cd <REPO> || exit 1
+(
+set -eE
+trap 'echo "CHECK FAILED: a command failed at line $LINENO"' ERR
+S=$(bash -c '. ./lib.sh >/dev/null && printf %s "$GB_STATE"')
+test -d "$S"
+exec 9> "$S/alert-check.lock" && flock -w 120 9 || { echo "CHECK FAILED: another alert check is still running"; exit 1; }
+./doctor.sh > "$S/alert-doctor.out" 2>&1 || true
+grep -q '^Overall:' "$S/alert-doctor.out" || { echo "CHECK FAILED: doctor.sh printed no Overall line:"; head -c 300 "$S/alert-doctor.out"; exit 1; }
+{ [ -s "$S/ALERT" ] && awk '{print "alert " $0 "\t" $0}' "$S/ALERT"
+  awk -F: '/^PROBLEM/ && !/^PROBLEM +alerts:/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' "$S/alert-doctor.out"
+} > "$S/alert-current.tsv"
+touch "$S/alert-reported"
+awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' "$S/alert-current.tsv" "$S/alert-reported" > "$S/alert-reported.new"
+mv "$S/alert-reported.new" "$S/alert-reported"
+awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' "$S/alert-reported" "$S/alert-current.tsv" > "$S/alert-new.tsv"
+cut -f1 "$S/alert-new.tsv" >> "$S/alert-reported"
+echo "--- new problems:"
+cut -f2 "$S/alert-new.tsv"
+)
+2. If any output line starts with "CHECK FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
+ALERT CHECK: nothing new
+3. Otherwise the first line is exactly:
+ALERT CHECK: NEW PROBLEMS, parent: tell the owner now
+Then the printed problem lines, unchanged.
+4. If step 1 fails or prints a "CHECK FAILED:" line, the first line is exactly:
+ALERT CHECK: FAILED
+Then the printed error text (at most 300 bytes). No logs, no message content, no secrets.
+```
+
+### Alert check parent chat
+On each handoff, follow the line that matches the first line of the result:
+
+- `ALERT CHECK: nothing new`. Do nothing. Do not message the owner.
+- `ALERT CHECK: NEW PROBLEMS, parent: tell the owner now`. Send the owner one short message in
+  `<LANGUAGE>` and plain words: what is wrong, the likely cause, and the next step. Use the cause and
+  next-step list in step A3 above. Do not paste logs. The scheduled run has already recorded these
+  problems, so you run no command.
+- `ALERT CHECK: FAILED`. Tell the owner once per day that the alert check could not run, with the error text.
+
+Do not acknowledge alerts, restart the scheduler, or change anything to fix a problem in this chat run.
+The owner decides, and the daily routine's A1 step restarts a dead scheduler. After a fix, acknowledge with
+`./status.sh --ack`, as described in the export loop section.

@@ -108,10 +108,12 @@ Exit 75 means the backup lock is busy: retry in a few minutes. If the test resto
 the owner (see `docs/runbooks.md`).
 
 ### 9. [HUMAN] Choose an alert channel
-By default alerts only go to `state/ALERT` + `logs/alerts.log` and (after step 10) the bots' daily reports. Ask the owner where they want
-alerts sent (e-mail, chat webhook, push service...) - never pick one for them. Then set `ALERT_HOOK` in
-`config.env`: a command that receives the alert text on stdin. Examples and details:
-`docs/health-and-alerts.md`. If the owner wants no extra channel, leave it empty.
+Alerts always go to `state/ALERT` + `logs/alerts.log`. After step 10, GrokBox-Main's hourly alert check also tells the
+owner in GrokBox-Main's chat about each new problem, so a Grok Bot owner needs nothing more. Ask the owner whether they
+also want an extra channel (e-mail, chat webhook, push service...) - never pick one for them. If they do, set
+`ALERT_HOOK`, `ALERT_WEBHOOK_URL` or `ALERT_NTFY_URL` in `config.env`; `ALERT_HOOK` is a command that receives the alert text on
+stdin. Examples and details: `docs/health-and-alerts.md`. If the owner wants no extra channel, leave them empty and set
+`ALERT_CHANNEL_REQUIRED=0` once step 10 is done, because doctor cannot see the chat channel.
 
 ### 10. Create the two Grok Box bots: GrokBox-Main and GrokBox-Assist (do this yourself)
 A box backup alone misses what lives only on the Grok Bot servers: every bot's full conversation history
@@ -124,7 +126,8 @@ and cannot talk to the owner. Every run explicitly hands transcript paging to it
 Grok Box / watchdog routine of yours once both bots are running. Read [docs/bots.md](docs/bots.md) first.
 
 - **GrokBox-Main** does all backup work. Box side: `install.sh --schedule`, `status.sh`, alerts, Drive
-  re-consent. Server side: it exports every bot's conversation and the memory.
+  re-consent. Server side: it exports every bot's conversation and the memory. It also runs an hourly
+  alert check that tells the owner in its chat about new problems.
 - **GrokBox-Assist** exports Main's own conversation and your main chat. A bot cannot export the
   conversation it is running in. Assist also checks that Main's run happened, and covers for Main if it
   missed one. Each bot exports the other, so both see each other's work.
@@ -141,7 +144,8 @@ Steps:
    filled in. Each bot then:
    - reads its template ([docs/routine-main.md](docs/routine-main.md) or [docs/routine-assist.md](docs/routine-assist.md));
    - **creates its own routine with its `UpdateRoutine` tool** (Main once a day, Assist twice a day, one
-     routine each);
+     routine each). Main also creates a second routine, the hourly alert check
+     ([docs/routine-main.md](docs/routine-main.md#alert-check-second-routine-hourly));
    - **runs the first full export right away in its normal chat, not in the scheduled routine**.
      Main exports all bots except itself; Assist exports Main and your main chat.
    They reply with a short status. Do not paste conversation content anywhere.
@@ -155,7 +159,7 @@ Steps:
    so the export is in a snapshot.
 
 Both parent chats report to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale
-guard, export gaps, or a missed partner run. Details: [docs/server-export.md](docs/server-export.md).
+guard, export gaps, or a missed partner run. Main's alert check reports each new alert or doctor problem within an hour. Details: [docs/server-export.md](docs/server-export.md).
 
 ### 11. Fill the expected-bot roster
 Once the first export is complete, set `EXPECTED_BOTS` in `config.env` to the bots that must be in every

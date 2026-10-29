@@ -7,6 +7,12 @@ is the only supported version.
 ## [Unreleased]
 
 ### Added
+- Docs: GrokBox-Main's chat is now the default alert channel. `docs/routine-main.md` has a second,
+  hourly "alert check" routine. It collects new `state/ALERT` lines and `doctor.sh` PROBLEM rows, keeps
+  the keys it already reported in `state/alert-reported`, and hands only new problems to Main's chat
+  for the owner. The routine only reads: it never acknowledges alerts, restarts the scheduler, or edits
+  `config.env`. ntfy, webhook and `ALERT_HOOK` stay optional. `tests/ci-install.sh` runs the doc's
+  collection step against a fake `doctor.sh`.
 - `server-export-merge.py dedupe [--dry-run] [ID...]` cleans adjacent repeated transcript blocks
   for ids with failed-overlap warnings, ignoring volatile memory-context lines when comparing,
   preserving originals and updating export counts and warnings.

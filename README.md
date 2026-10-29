@@ -129,9 +129,11 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   at `QUOTA_ALERT_PCT` (90%) full ([docs/capacity-and-logs.md](docs/capacity-and-logs.md)). Logs are kept forever by
   default; set `LOG_RETENTION_DAYS` to delete old `logs/backup-*.log` files.
 - **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. The same
-  alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). No e-mail is sent by default: the box
-  needs a destination: configure `ALERT_NTFY_URL`, `ALERT_WEBHOOK_URL` or `ALERT_HOOK`, then run `./test-alert.sh` ([Get alerts to a human](docs/health-and-alerts.md#get-alerts-to-a-human)).
-  Both bot routines read `status.sh --local` and `state/ALERT` every day; their parent chats report every
+  alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). With Grok Bot, GrokBox-Main's hourly
+  alert check tells the owner in GrokBox-Main's chat about each new problem, with no extra setup
+  ([docs/routine-main.md](docs/routine-main.md#alert-check-second-routine-hourly)). Without Grok Bot, or for an extra channel,
+  configure `ALERT_NTFY_URL`, `ALERT_WEBHOOK_URL` or `ALERT_HOOK`, then run `./test-alert.sh` ([Get alerts to a human](docs/health-and-alerts.md#get-alerts-to-a-human)).
+  Both bot routines also read `status.sh --local` and `state/ALERT` every day; their parent chats report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
   scheduler is noticed within a day.
 - **Health check, weekly test restore, Drive report, expected bots** ([docs/health-and-alerts.md](docs/health-and-alerts.md)): `./doctor.sh`
