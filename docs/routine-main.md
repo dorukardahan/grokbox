@@ -146,6 +146,8 @@ runs a backup, or edits `config.env`. The daily routine, its parent chat, and th
   line says there are new problems.
 
 ### How "new" is decided
+`doctor.sh` exits 0, 1 or 2 for OK, WARN or PROBLEM, so its exit code cannot show a crash. The run treats
+a doctor output without an `Overall:` line as a failure, so a broken doctor never looks like a healthy box.
 The scheduled run collects the open problems into `state/alert-current.tsv`, one line per problem:
 a key, a tab, and the text. An alert's key is its full `state/ALERT` line, which carries a timestamp.
 A doctor problem's key is its check name, such as `scheduler`, so a changing detail does not repeat it.
@@ -160,25 +162,27 @@ This run only reads. Always return the handoff below, even when nothing is new.
 Rules: never print secrets (secrets/*, restic password, tokens, auth URLs); never run status.sh --ack,
 install.sh, backup.sh, restore.sh or --force; never edit config.env; never print or summarize
 conversation content; no cookies, scraped tokens or internal APIs; do not change other bots' settings,
-routines or memory. Write only the three state files named in step 1.
+routines or memory. Write only the state files named in step 1.
 
 1. Run exactly this and read its output:
 cd <REPO> || exit 1
+./doctor.sh > state/alert-doctor.out 2>&1
+grep -q '^Overall:' state/alert-doctor.out || { echo "DOCTOR FAILED:"; head -c 300 state/alert-doctor.out; exit 1; }
 { [ -s state/ALERT ] && awk '{print "alert " $0 "\t" $0}' state/ALERT
-  ./doctor.sh 2>&1 | awk -F: '/^PROBLEM/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}'
+  awk -F: '/^PROBLEM/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' state/alert-doctor.out
 } > state/alert-current.tsv
 touch state/alert-reported
 awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' state/alert-current.tsv state/alert-reported > state/alert-reported.new && mv state/alert-reported.new state/alert-reported
 echo "--- new problems:"
 awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen) {print $2}' state/alert-reported state/alert-current.tsv
-2. If nothing is printed after "--- new problems:", the first line of your result is exactly:
+2. If the output starts with "DOCTOR FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
 ALERT CHECK: nothing new
 3. Otherwise the first line is exactly:
 ALERT CHECK: NEW PROBLEMS, parent: tell the owner now
 Then the printed problem lines, unchanged.
-4. If step 1 itself fails, the first line is exactly:
+4. If step 1 fails or prints "DOCTOR FAILED:", the first line is exactly:
 ALERT CHECK: FAILED
-Then one line with the error. No logs, no message content, no secrets.
+Then the printed error text (at most 300 bytes). No logs, no message content, no secrets.
 ```
 
 ### Alert check parent chat
@@ -191,7 +195,7 @@ On each handoff, follow the line that matches the first line of the result:
   ```bash
   cd <REPO> && cut -f1 state/alert-current.tsv | sort -u > state/alert-reported
   ```
-- `ALERT CHECK: FAILED`. Tell the owner once per day that the alert check could not run, with the error line.
+- `ALERT CHECK: FAILED`. Tell the owner once per day that the alert check could not run, with the error text.
 
 Do not acknowledge alerts, restart the scheduler, or change anything to fix a problem in this chat run.
 The owner decides, and the daily routine's A1 step restarts a dead scheduler. After a fix, acknowledge with
