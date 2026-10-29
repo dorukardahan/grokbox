@@ -50,8 +50,10 @@ stale scheduler heartbeat is excused only while the scheduler's own verified chi
 set `""` to turn the weekly run off) at `TEST_RESTORE_AT` (default `02:20`, keep it away from
 `DAILY_CHECK_AT`). Slots are due-based: a slot missed while the box was off is caught up at the next tick.
 First start leaves the weekly slot due; the once-after-first-hourly restore marks that slot on success,
-so the weekly job waits for the next due weekday/time. Until a restore succeeds, a failed weekly run
-leaves its slot due and retries at most once per day (`state/sched-test-restore-retry`); lock busy retries next minute.
+so the weekly job waits for the next due weekday/time. Until a restore succeeds, a failed first or weekly
+run leaves its slot due and records today in `state/sched-test-restore-retry`. The weekly block then
+waits until a later calendar day to retry, including after a first-restore failure in the same loop pass.
+Lock busy does not consume the daily retry; the weekly block retries when next eligible.
 Both doctor and status warn after `TEST_RESTORE_MAX_DAYS` since success (default 10 for weekly, otherwise 35).
 With a complete hourly backup, no first success warns after `TEST_RESTORE_FIRST_DAYS` (default 3) from first start.
 The monthly run from `check.sh` is unchanged.

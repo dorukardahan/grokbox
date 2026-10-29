@@ -1197,10 +1197,12 @@ check "fresh scheduler with no hourly success does not run a restore" test ! -s 
 sched_case once 0 '0 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-16 02:20'
 check "once success marks this slot and avoids a second restore on the next tick" grep -qx '2 slot=2000-01-09 retry=missing calls=1' "$SC_STATE/boundaries"
 check "weekly restore runs at the next due weekday/time after once" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-16 --and-- test -s "$SC_STATE/test-restore-attempted"
-sched_case failed-once 0 '6 6 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-10 03:00' '2000-01-10 03:01'
-check "failed once leaves weekly due; failed weekly unmarks slot and remembers today" grep -qx '1 slot=missing retry=2000-01-09 calls=2' "$SC_STATE/boundaries"
-check "never succeeded: no second weekly attempt that day" grep -qx '2 slot=missing retry=2000-01-09 calls=2' "$SC_STATE/boundaries"
-check "never succeeded: next day retries the same due slot and records success" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test -s "$SC_STATE/last-test-restore"
+sched_case failed-once 0 '6 6 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-10 03:00' '2000-01-10 03:01' '2000-01-11 03:00' '2000-01-11 03:01'
+check "failed first restore: only one invocation that pass, slot due and today's retry marker set" grep -qx '1 slot=missing retry=2000-01-09 calls=1' "$SC_STATE/boundaries"
+check "failed first restore: later same-day tick does not retry" grep -qx '2 slot=missing retry=2000-01-09 calls=1' "$SC_STATE/boundaries"
+check "never succeeded: next day retries once and records today's failure" grep -qx '3 slot=missing retry=2000-01-10 calls=2' "$SC_STATE/boundaries"
+check "never succeeded: failed weekly retry waits another day" grep -qx '4 slot=missing retry=2000-01-10 calls=2' "$SC_STATE/boundaries"
+check "never succeeded: later day retries the same due slot and records success" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test -s "$SC_STATE/last-test-restore"
 sched_case busy 60 '75 0' attempted '2000-01-09 03:00' '2000-01-09 03:01'
 check "lock busy leaves slot unmarked without delaying until tomorrow" grep -qx '1 slot=missing retry=missing calls=1' "$SC_STATE/boundaries"
 check "lock busy retries next minute and marks the successful slot" all test "$(cat "$SC_STATE/calls")" = $'--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09
