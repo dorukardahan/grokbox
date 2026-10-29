@@ -253,7 +253,6 @@ check "alert check step 1 is extracted from the doc" test -s "$AC_REPO/check.sh"
 ac_new() { bash "$AC_REPO/check.sh" | awk 'f {print} /^--- new problems:/ {f=1}'; }
 printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running\nWARN x: y\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
 check "alert check: a new doctor PROBLEM is reported" bash -c '[[ "$1" == *"scheduler: NOT running"* && "$1" != *WARN* ]]' _ "$(ac_new)"
-cut -f1 "$AC_REPO/state/alert-current.tsv" | sort -u > "$AC_REPO/state/alert-reported"
 printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running for 5 h\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
 check "alert check: the same problem with a changed detail is not repeated" test -z "$(ac_new)"
 echo '[2026-10-29 10:00:00 +03] [backup.sh] boom' > "$AC_REPO/state/ALERT"

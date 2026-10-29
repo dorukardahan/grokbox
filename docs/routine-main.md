@@ -151,9 +151,11 @@ a doctor output without an `Overall:` line as a failure, so a broken doctor neve
 The scheduled run collects the open problems into `state/alert-current.tsv`, one line per problem:
 a key, a tab, and the text. An alert's key is its full `state/ALERT` line, which carries a timestamp.
 A doctor problem's key is its check name, such as `scheduler`, so a changing detail does not repeat it.
-`state/alert-reported` lists the keys the owner has already been told about. The scheduled run drops
-keys that are no longer open, so a problem that comes back is reported again. The parent chat adds
-keys to `state/alert-reported` only after it has told the owner.
+`state/alert-reported` lists the keys already handed to the parent chat. The scheduled run drops
+keys that are no longer open, so a problem that comes back is reported again. It adds each new key
+when it prints the problem, so two overlapping handoffs can never hide a problem from each other.
+The cost is that a handoff the parent chat never acts on is not repeated by this routine. The daily
+routine still lists every open alert, so the owner hears about it within a day.
 
 ### Alert check scheduled run
 ```text
@@ -173,8 +175,10 @@ grep -q '^Overall:' state/alert-doctor.out || { echo "DOCTOR FAILED:"; head -c 3
 } > state/alert-current.tsv
 touch state/alert-reported
 awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' state/alert-current.tsv state/alert-reported > state/alert-reported.new && mv state/alert-reported.new state/alert-reported
+awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' state/alert-reported state/alert-current.tsv > state/alert-new.tsv
+cut -f1 state/alert-new.tsv >> state/alert-reported
 echo "--- new problems:"
-awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen) {print $2}' state/alert-reported state/alert-current.tsv
+cut -f2 state/alert-new.tsv
 2. If the output starts with "DOCTOR FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
 ALERT CHECK: nothing new
 3. Otherwise the first line is exactly:
@@ -191,10 +195,8 @@ On each handoff, follow the line that matches the first line of the result:
 - `ALERT CHECK: nothing new`. Do nothing. Do not message the owner.
 - `ALERT CHECK: NEW PROBLEMS, parent: tell the owner now`. Send the owner one short message in
   `<LANGUAGE>` and plain words: what is wrong, the likely cause, and the next step. Use the cause and
-  next-step list in step A3 above. Do not paste logs. Then record what you reported:
-  ```bash
-  cd <REPO> && cut -f1 state/alert-current.tsv | sort -u > state/alert-reported
-  ```
+  next-step list in step A3 above. Do not paste logs. The scheduled run has already recorded these
+  problems, so you run no command.
 - `ALERT CHECK: FAILED`. Tell the owner once per day that the alert check could not run, with the error text.
 
 Do not acknowledge alerts, restart the scheduler, or change anything to fix a problem in this chat run.
