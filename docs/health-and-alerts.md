@@ -99,20 +99,21 @@ Run `./test-alert.sh`: it sends a marked TEST synchronously and prints each chan
 Doctor and status warn if no channel is configured; set `ALERT_CHANNEL_REQUIRED=0` to read only logs on purpose.
 Doctor also warns about failed real deliveries or tests. `logs/alert-hook.log` records failures without built-in destination URLs; failures never stop backups.
 
-`ALERT_HOOK` is a shell command run for every *new* alert with the alert text
+`ALERT_HOOK` is a custom shell command run for every *new* alert with the alert text
 on stdin and in `$GB_ALERT_MSG`, under `timeout` (`ALERT_HOOK_TIMEOUT`, default 60 s). Its output goes to
 `logs/alert-hook.log`; a failing or hung hook is logged (`WARN alert hook exited rc=...`) and never fails
 the job that raised the alert. A hook that itself raises an alert does not trigger the hook again.
-The box cannot send mail on its own: the hook needs a mail command, a relay or a webhook you set up.
+Never put secrets in hook commands: `bash -c "$ALERT_HOOK"` exposes them in process arguments; built-in URL settings use `curl -K -` via stdin.
+The box cannot send mail on its own: the hook needs a mail command or a relay you set up.
 Examples (placeholders only; keep real addresses and URLs in your local `config.env`, never in the repo):
 ```bash
 # e-mail through a local mail/sendmail setup (msmtp, ssmtp, a relay you configured)
 ALERT_HOOK='mail -s "Grok Box alert on $(hostname)" you@example.com'
 ALERT_HOOK='{ printf "Subject: Grok Box alert\n\n"; cat; } | sendmail you@example.com'
-# chat webhook (Slack/Discord/Mattermost style: a JSON POST; python builds the JSON safely from stdin)
-ALERT_HOOK='python3 -c "import json,sys,urllib.request as u; u.urlopen(u.Request(\"https://chat.example.com/hooks/<webhook-id>\", json.dumps({\"text\": sys.stdin.read()}).encode(), {\"Content-Type\": \"application/json\"}))"'
+# chat webhook (JSON POST with a "text" field)
+ALERT_WEBHOOK_URL="https://chat.example.com/hooks/<webhook-id>"
 # ntfy-style push
-ALERT_HOOK='curl -fsS -d @- https://ntfy.example.com/<topic>'
+ALERT_NTFY_URL="https://ntfy.example.com/<topic>"
 ```
 The bot routines still report every open alert in chat; the hook is an extra channel.
 
