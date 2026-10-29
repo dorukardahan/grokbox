@@ -19,6 +19,7 @@ upload, expected bots. Ends with `Overall: OK | WARN | PROBLEM`.
 | doctor row | what it shows |
 |---|---|
 | hourly slots | Missed completed local clock hours in `HOURLY_SLOT_WINDOW_H` (default 24), capped by the later of first start and the earliest recorded history entry; WARN at `HOURLY_MISS_WARN` (default 1), naming up to six hours. Complete hourly successes keep the latest 400 entries in `state/hourly-history`. |
+| alert check | Only when `state/alert-reported` exists (GrokBox-Main's [hourly alert-check routine](routine-main.md#alert-check-second-routine-hourly) has run on this box). Every run touches that file, so WARN when it is older than `ALERT_CHECK_MAX_HOURS` (default 26): the routine looks stopped and problems are not reaching the owner's chat. This holds even with `ALERT_CHANNEL_REQUIRED=0`. |
 | quick chain | WARN after the greater of two hours or three quick intervals without a success; disabled when `QUICK_EVERY_MIN=0`. The first quick backup has two hours of grace. |
 | skipped backup | WARN when an hourly run gave up waiting for the lock after the last success; shows the time and holder. The next hourly run retries. |
 
