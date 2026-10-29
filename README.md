@@ -250,7 +250,7 @@ For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.
 | `manifest.py` | file count / bytes / newest mtime for the guard |
 | `sqlite-snapshot.py` | consistent copies of live SQLite databases |
 | `brain-export.py` | agent data/store discovery, mirror of stores outside the roots, `INDEX.md` |
-| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/`; `age` (did an export happen?), `repair` (renamed-bot split files) ([docs/server-export.md](docs/server-export.md)) |
+| `server-export-merge.py` | merges ReadTranscript / RecallMemory result files into `staging/server-export/`; `age` (did an export happen?), `repair` (renamed-bot split files), `dedupe [--dry-run] [ID...]` (repeated-block cleanup) ([docs/server-export.md](docs/server-export.md)) |
 | `rebuild-kit/inventory.sh` | records installed tools and venv freezes into `state/rebuild-kit/` |
 | `excludes.txt`, `excludes-secrets.txt`, `excludes-lean.txt` | always / only if `BACKUP_SECRETS=0` / only if `BACKUP_PROFILE=lean` |
 | `docs/google-cloud-setup.md` | exact Google Cloud steps for the OAuth client |
