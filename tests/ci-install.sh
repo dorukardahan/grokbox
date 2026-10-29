@@ -262,7 +262,7 @@ check "alert check: resolved problems leave the reported list" test ! -s "$AC_RE
 printf 'PROBLEM  scheduler: NOT running\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
 check "alert check: a problem that comes back is reported again" bash -c '[[ "$1" == *"scheduler: NOT running"* ]]' _ "$(ac_new)"
 printf 'config.env: no such file\n' > "$AC_REPO/doctor.out"
-check "alert check: a crashed doctor gives DOCTOR FAILED, not nothing new" bash -c '[[ "$(bash "$1" 2>&1)" == "DOCTOR FAILED:"* ]]' _ "$AC_REPO/check.sh"
+check "alert check: a crashed doctor gives CHECK FAILED, not nothing new" bash -c '[[ "$(bash "$1" 2>&1)" == "CHECK FAILED:"* ]]' _ "$AC_REPO/check.sh"
 
 echo
 echo "ci-install test: $PASS_N passed, $FAIL_N failed"

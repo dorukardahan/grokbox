@@ -154,6 +154,7 @@ A doctor problem's key is its check name, such as `scheduler`, so a changing det
 `state/alert-reported` lists the keys already handed to the parent chat. The scheduled run drops
 keys that are no longer open, so a problem that comes back is reported again. It adds each new key
 when it prints the problem, so two overlapping handoffs can never hide a problem from each other.
+A `flock` on `state/alert-check.lock` makes two overlapping collections run one after the other.
 The cost is that a handoff the parent chat never acts on is not repeated by this routine. The daily
 routine still lists every open alert, so the owner hears about it within a day.
 
@@ -168,8 +169,9 @@ routines or memory. Write only the state files named in step 1.
 
 1. Run exactly this and read its output:
 cd <REPO> || exit 1
+exec 9> state/alert-check.lock && flock -w 120 9 || { echo "CHECK FAILED: another alert check is still running"; exit 1; }
 ./doctor.sh > state/alert-doctor.out 2>&1
-grep -q '^Overall:' state/alert-doctor.out || { echo "DOCTOR FAILED:"; head -c 300 state/alert-doctor.out; exit 1; }
+grep -q '^Overall:' state/alert-doctor.out || { echo "CHECK FAILED: doctor.sh printed no Overall line:"; head -c 300 state/alert-doctor.out; exit 1; }
 { [ -s state/ALERT ] && awk '{print "alert " $0 "\t" $0}' state/ALERT
   awk -F: '/^PROBLEM/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' state/alert-doctor.out
 } > state/alert-current.tsv
@@ -179,12 +181,12 @@ awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' state/alert-repo
 cut -f1 state/alert-new.tsv >> state/alert-reported
 echo "--- new problems:"
 cut -f2 state/alert-new.tsv
-2. If the output starts with "DOCTOR FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
+2. If the output starts with "CHECK FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
 ALERT CHECK: nothing new
 3. Otherwise the first line is exactly:
 ALERT CHECK: NEW PROBLEMS, parent: tell the owner now
 Then the printed problem lines, unchanged.
-4. If step 1 fails or prints "DOCTOR FAILED:", the first line is exactly:
+4. If step 1 fails or prints "CHECK FAILED:", the first line is exactly:
 ALERT CHECK: FAILED
 Then the printed error text (at most 300 bytes). No logs, no message content, no secrets.
 ```
