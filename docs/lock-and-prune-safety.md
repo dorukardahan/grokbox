@@ -46,6 +46,9 @@ atomically installed. `--test` never cleans up a concurrent consent flow's files
 
 ## Snapshot promotion and stale locks
 
+Before promotion the backup lists repository locks (read-only). The backup's own restic process has
+exited by then, so a lock still present is stale; if there is one, a plain `restic unlock` (stale locks only) clears it
+quietly (logged, no alert, spends the shared unlock budget below).
 Promotion waits up to `PROMOTE_LOCK_WAIT` (default `2m`) for an exclusive lock.
 After the first failure it retries once with the snapshot's current ID,
 using the shared plain-unlock budget below.
