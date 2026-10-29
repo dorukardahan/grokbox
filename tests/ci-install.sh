@@ -244,6 +244,25 @@ check "Main scheduled prompt keeps B4–B6 and never runs B1–B3" bash -c '
 check "Assist scheduled prompt requires exact parent handoff" grep -Fxq 'EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop now' "$REPO_DIR/docs/routine-assist.md"
 check "daily export check is executable and documented" bash -c 'test -x "$1/export-freshness.sh" && grep -q "export-freshness.sh" "$1/README.md"' _ "$REPO_DIR"
 
+step "4. Main alert check (docs/routine-main.md) reports a problem once"
+AC_REPO="$TMP/alertcheck"; mkdir -p "$AC_REPO/state"
+printf '#!/usr/bin/env bash\ncat "%s/doctor.out"\n' "$AC_REPO" > "$AC_REPO/doctor.sh"; chmod +x "$AC_REPO/doctor.sh"
+sed -n '/^1\. Run exactly this and read its output:/,/^2\. If nothing is printed/p' "$REPO_DIR/docs/routine-main.md" \
+  | sed '1d;$d' | sed "s|<REPO>|$AC_REPO|g" > "$AC_REPO/check.sh"
+check "alert check step 1 is extracted from the doc" test -s "$AC_REPO/check.sh"
+ac_new() { bash "$AC_REPO/check.sh" | awk 'f {print} /^--- new problems:/ {f=1}'; }
+printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running\nWARN x: y\n' > "$AC_REPO/doctor.out"
+check "alert check: a new doctor PROBLEM is reported" bash -c '[[ "$1" == *"scheduler: NOT running"* && "$1" != *WARN* ]]' _ "$(ac_new)"
+cut -f1 "$AC_REPO/state/alert-current.tsv" | sort -u > "$AC_REPO/state/alert-reported"
+printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running for 5 h\n' > "$AC_REPO/doctor.out"
+check "alert check: the same problem with a changed detail is not repeated" test -z "$(ac_new)"
+echo '[2026-10-29 10:00:00 +03] [backup.sh] boom' > "$AC_REPO/state/ALERT"
+check "alert check: a new state/ALERT line is reported" bash -c '[[ "$1" == *"] boom" && "$1" != *scheduler* ]]' _ "$(ac_new)"
+: > "$AC_REPO/doctor.out"; rm -f "$AC_REPO/state/ALERT"; ac_new >/dev/null
+check "alert check: resolved problems leave the reported list" test ! -s "$AC_REPO/state/alert-reported"
+printf 'PROBLEM  scheduler: NOT running\n' > "$AC_REPO/doctor.out"
+check "alert check: a problem that comes back is reported again" bash -c '[[ "$1" == *"scheduler: NOT running"* ]]' _ "$(ac_new)"
+
 echo
 echo "ci-install test: $PASS_N passed, $FAIL_N failed"
 [[ $FAIL_N == 0 ]]

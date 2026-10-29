@@ -5,7 +5,7 @@ creates them and keeps **no** backup routine of its own.
 
 | bot | parent chat | scheduled routine |
 |---|---|---|
-| **GrokBox-Main** | exports every non-deleted bot except itself, reports health/export problems | health + memory + mandatory handoff; [routine-main.md](routine-main.md), e.g. 05:15 |
+| **GrokBox-Main** | exports every non-deleted bot except itself, reports health/export problems, and is the default alert channel | daily health + memory + mandatory handoff, e.g. 05:15; plus an hourly alert check; [routine-main.md](routine-main.md) |
 | **GrokBox-Assist** | exports Main + primary chat, covers stale bots; alerts before exporting its own row if Main missed a day | health + memory + age checks + mandatory handoff, twice a day; [routine-assist.md](routine-assist.md), e.g. 09:00 and 21:00 |
 
 **Why two bots?** A bot cannot export the conversation it is in. Its own transcript is still being

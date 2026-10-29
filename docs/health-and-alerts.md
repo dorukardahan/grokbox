@@ -93,7 +93,14 @@ that raises an alert cannot deadlock. Scripts should still pass stable, specific
 
 ### Get alerts to a human
 
-The repo does not pick a destination for you. All channels are optional and can be combined in private `config.env`:
+**Default channel: GrokBox-Main's chat.** If you run Grok Box with Grok Bot, GrokBox-Main's hourly
+[alert check](routine-main.md#alert-check-second-routine-hourly) reads `state/ALERT` and the `PROBLEM`
+rows of `doctor.sh`. When it finds one it has not reported yet, GrokBox-Main tells the owner in its own chat. It
+needs no app, URL or `config.env` setting, and it reports each problem once. Because the check is
+hourly, a problem can take up to an hour to arrive.
+
+The channels below are optional. Use them without Grok Bot, or in addition to the chat when you want a
+faster or a separate push. They can be combined in private `config.env`:
 
 - ntfy: set `ALERT_NTFY_URL="https://ntfy.sh/<your-private-topic>"`.
   Subscribe to that topic in your ntfy app; each new alert is posted as plain text.
@@ -102,7 +109,8 @@ The repo does not pick a destination for you. All channels are optional and can 
 - Command: set `ALERT_HOOK` (examples below). Each channel uses `ALERT_HOOK_TIMEOUT` (default 60 s).
 
 Run `./test-alert.sh`: it sends a marked TEST synchronously and prints each channel's result; exit 0 = all passed, 1 = failed, 3 = none configured. It creates no incident.
-Doctor and status warn if no channel is configured; set `ALERT_CHANNEL_REQUIRED=0` to read only logs on purpose.
+Doctor and status warn if no channel is configured. They cannot see the chat channel, so with GrokBox-Main's alert check
+as the only channel, set `ALERT_CHANNEL_REQUIRED=0` in `config.env` to silence that warning.
 Doctor also warns about failed real deliveries or tests. `logs/alert-hook.log` records failures without built-in destination URLs; failures never stop backups.
 
 `ALERT_HOOK` is a custom shell command run for every *new* alert with the alert text
@@ -121,7 +129,8 @@ ALERT_WEBHOOK_URL="https://chat.example.com/hooks/<webhook-id>"
 # ntfy-style push
 ALERT_NTFY_URL="https://ntfy.example.com/<topic>"
 ```
-The bot routines still report every open alert in chat; the hook is an extra channel.
+The bot routines still report in chat: GrokBox-Main's alert check reports each new problem once, and the daily
+routines report every open alert. The hook is an extra channel.
 
 ## 4. Expected-bot roster (`expected-bots.sh`)
 `EXPECTED_BOTS=()` lists bots (names or agent ids) that must be in every server-side export. Keep the real
