@@ -8,10 +8,10 @@
 # Exit codes: 0 ok/skipped, 3 missing credentials, 4 stale-computer guard tripped, 6 incomplete snapshot
 # (kept, alert raised, no baseline/last-success update, no forget), 7 repo unreachable.
 source "$(dirname "$0")/lib.sh"
-DRY=0; FORCE=""; FORGET=1; MODE=auto; WAIT=0
+DRY=0; FORCE=""; FORGET=1; MODE=auto; WAIT=0; WAIT_REQUESTED=0
 while [[ $# -gt 0 ]]; do case "$1" in
   --dry-run) DRY=1;; --force) FORCE="${2:?reason required}"; shift;; --no-forget) FORGET=0;;
-  --quick) MODE=quick;; --wait) WAIT="${2:?seconds}"; shift;;
+  --quick) MODE=quick;; --wait) WAIT="${2:?seconds}"; WAIT_REQUESTED=1; shift;;
   *) echo "unknown arg $1"; exit 2;; esac; shift; done
 [[ $MODE == quick ]] && WAIT=0
 if [[ $DRY == 1 ]]; then   # private temp files: a dry run never touches shared state
@@ -21,7 +21,7 @@ else
   exec 9>"$GB_STATE/backup.lock"
   if ! flock -w "$WAIT" 9; then
     problem=$(lock_problem); [[ -z "$problem" ]] || alert "$problem"
-    if [[ $MODE == auto ]]; then
+    if [[ $MODE == auto && $WAIT_REQUESTED == 1 ]]; then
       holder=unknown
       if lock_record; then holder="${LOCK_JOB:-unknown}"; fi
       printf 'time=%s\nmode=auto\nreason=lock-busy\nholder=%s\nwaited=%s\n' "$(date +%s)" "$holder" "$WAIT" > "$GB_STATE/backup-skipped"

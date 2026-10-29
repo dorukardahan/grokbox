@@ -455,13 +455,19 @@ check 'retention cleanup shares startup unlock budget' test "$(grep -cx unlock "
 check 'helper removes stderr temporary files' test -z "$(find "$TMP/state" -name 'restic-error.*')"
 unset CLEANUP_LOCKED
 
-# An hourly flock timeout is visible and deduplicated; a quick skip stays quiet.
+# A manual skip stays quiet; a scheduled hourly timeout is visible and deduplicated.
 reset_promotion
 rm -f "$TMP/skip-ready"
 # shellcheck disable=SC2016 # evaluated in the child
 bash -c 'exec 9>>"$1/state/backup.lock"; flock 9; touch "$1/skip-ready"; exec sleep 120' _ "$TMP" & LP=$!; CHILDREN+=("$LP")
 for _ in {1..100}; do [[ -f "$TMP/skip-ready" ]] && break; sleep .05; done
 echo "$(date +%s) $LP check.sh check" > "$TMP/state/lock-holder"
+rc=0; "$REPO_DIR/backup.sh" > "$TMP/skip.out" 2>&1 || rc=$?
+check 'busy manual backup preserves exit zero' test "$rc" = 0
+check 'busy manual backup logs the skip' grep -q 'auto: another backup/check is running; skip' "$TMP/skip.out"
+check 'busy manual backup creates no skip state' test ! -e "$TMP/state/backup-skipped"
+check 'busy manual backup raises no alert' test ! -e "$TMP/state/ALERT"
+rm -f "$TMP/state/backup-skipped" "$TMP/state/ALERT" "$TMP/state/alert-seen"
 for _ in 1 2; do
   rc=0; "$REPO_DIR/backup.sh" --wait 1 > "$TMP/skip.out" 2>&1 || rc=$?
   check 'busy hourly backup preserves exit zero' test "$rc" = 0
