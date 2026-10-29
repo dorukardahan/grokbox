@@ -58,7 +58,7 @@ Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md
 | every hour at :17 | full snapshot + brain export + SQLite copies + forget | `auto` | hourly 24, daily 30, weekly 12, monthly 12 |
 | every 15 min | quick snapshot, same roots/excludes (unchanged files are only stat'ed) | `quick` | everything of the last 24 h |
 | once, after the first hourly | `test-restore.sh` (real restore of a sample + checksum verify, then deleted) | | |
-| weekly, Sunday 02:20 | `test-restore.sh --weekly` (critical files + sample, SHA-256 compare with live files); `TEST_RESTORE_WEEKDAY` / `TEST_RESTORE_AT` | | |
+| weekly, Sunday 02:20 | `test-restore.sh --weekly` (critical files + sample, SHA-256 compare with live files); first hourly's successful test covers the current slot, then next due weekday/time; `TEST_RESTORE_WEEKDAY` / `TEST_RESTORE_AT` | | |
 | daily 04:40 | `check.sh`: forget by tag, `restic check --read-data-subset 5%`, then prune; on day 1 of a month also a test restore | | |
 | hourly :50 | watchdog: ALERT if no successful hourly snapshot for 3 h | | |
 
@@ -90,7 +90,7 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   default; set `LOG_RETENTION_DAYS` to delete old `logs/backup-*.log` files.
 - **Alerts**: failures append to `state/ALERT` + `logs/alerts.log`; `status.sh` prints them first; `status.sh --ack` clears. The same
   alert text is recorded once per incident (new incident after `--ack` or `ALERT_DEDUPE_HOURS`). No e-mail is sent by default: the box
-  cannot send messages on its own; an optional `ALERT_HOOK` command (mail, webhook) can be configured ([docs/health-and-alerts.md](docs/health-and-alerts.md)).
+  needs a destination: configure `ALERT_NTFY_URL`, `ALERT_WEBHOOK_URL` or `ALERT_HOOK`, then run `./test-alert.sh` ([Get alerts to a human](docs/health-and-alerts.md#get-alerts-to-a-human)).
   Both bot routines read `status.sh --local` and `state/ALERT` every day; their parent chats report every
   open alert to the owner in their chat run, and GrokBox-Assist restarts the scheduler if it is down (box move), so a dead
   scheduler is noticed within a day.

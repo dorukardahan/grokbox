@@ -25,6 +25,17 @@ at(){ isnum "$1" && date -d "@$1" '+%F %H:%M' || echo "?"; }
 if [[ -s "$GB_STATE/ALERT" ]]; then
   row PROBLEM alerts "$(wc -l < "$GB_STATE/ALERT") open; newest: $(tail -1 "$GB_STATE/ALERT" | cut -c1-140). Fix the cause, then ./status.sh --ack"
 else row OK alerts "none open"; fi
+channel_names=$(alert_channels)
+if [[ -z "$channel_names" ]]; then
+  if [[ "$ALERT_CHANNEL_REQUIRED" == 0 ]]; then row OK "alert channel" "disabled on purpose"
+  else row WARN "alert channel" "NO ALERT CHANNEL: failures are only written to state/ALERT and logs, nobody is told. Set ALERT_NTFY_URL, ALERT_WEBHOOK_URL or ALERT_HOOK in config.env (docs/health-and-alerts.md), then run ./test-alert.sh"; fi
+elif [[ "$(kv_get "$GB_STATE/alert-delivery.status" result)" == failed ]]; then
+  row WARN "alert channel" "last alert delivery FAILED $(ago "$(kv_epoch "$GB_STATE/alert-delivery.status" time)"); see logs/alert-hook.log, run ./test-alert.sh"
+elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" == failed ]]; then
+  row WARN "alert channel" "configured ($channel_names), last alert test FAILED; see logs/alert-hook.log, run ./test-alert.sh"
+elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" != ok ]]; then
+  row OK "alert channel" "configured ($channel_names), not tested yet: run ./test-alert.sh"
+else row OK "alert channel" "configured ($channel_names), test passed"; fi
 [[ -f "$GB_STATE/PAUSE" ]] && row WARN paused "state/PAUSE exists: the scheduler starts no jobs (rm state/PAUSE to resume)"
 [[ -e "$GUARD_LATCH" ]] && row PROBLEM "stale guard" "latch set ($(cut -d' ' -f2- "$GUARD_LATCH" 2>/dev/null | cut -c1-120)); forget/prune blocked until a good hourly backup; see REBUILD.md, never --force blindly"
 [[ -e "$SQLITE_LATCH" ]] && row WARN "sqlite staging" "latch set since $(at "$(epochf "$SQLITE_LATCH")"): a consistent-copy run failed; forget/prune blocked until a fully clean hourly backup"
@@ -79,14 +90,85 @@ elif isnum "$first" && (( now - first >= ${FIRST_SUCCESS_GRACE_HOURS:-2} * 3600 
   row PROBLEM "last backup" "no complete hourly backup yet, $(( (now - first) / 3600 )) h after the first start; run ./backup.sh and read its output"
 else row WARN "last backup" "none yet (just installed; the first hourly run or ./backup.sh creates it)"; fi
 
+# --- hourly slots: completed local clock hours only; the partial install hour is excused.
+window=$(num_ok "$HOURLY_SLOT_WINDOW_H"); window=${window:-24}
+miss_warn=$(num_ok "$HOURLY_MISS_WARN"); miss_warn=${miss_warn:-1}
+skipped_backup || true
+mapfile -t slots < <(python3 - "$GB_STATE/hourly-history" "$now" "$window" "$miss_warn" "${first:-0}" "${SKIP_TIME:-0}" "$SKIP_HOLDER" <<'PY'
+import re, sys, time
+path, now, window, warn, first, skip, holder = sys.argv[1:]
+now, window, warn, first, skip = map(int, (now, window, warn, first, skip))
+history = []
+try:
+    for line in open(path):
+        value = line.strip()
+        if not re.fullmatch(r'[0-9]{1,10}', value) or not 0 < int(value) < 8589934592:
+            raise ValueError('invalid epoch')
+        history.append(int(value))
+except (OSError, ValueError, UnicodeError):
+    history = []
+if not history:
+    fresh = first > 0 and now - first < 86400
+    print('OK' if fresh else 'WARN')
+    print('no history yet' if fresh else 'no hourly history (state/hourly-history missing)')
+else:
+    clock = time.localtime(now)
+    end = now - clock.tm_min * 60 - clock.tm_sec
+    start = max(end - window * 3600, first, 0)
+    # Bound work even if a window is configured larger than the retained history.
+    covered = {end + (t - end) // 3600 * 3600 for t in history if t < end}
+    count = max(0, (end - start) // 3600)
+    missed = count - sum(end - count * 3600 <= t < end for t in covered)
+    hours = []
+    for i in range(min(count, len(covered) + 6)):
+        hour = end - (count - i) * 3600
+        if hour not in covered:
+            hours.append(time.strftime('%H:00', time.localtime(hour)))
+            if len(hours) == 6:
+                break
+    detail = f'{missed} missed of {count} completed hours'
+    if missed:
+        detail += ': ' + ', '.join(hours) + (' ...' if missed > 6 else '')
+        skip_hour = end + (skip - end) // 3600 * 3600
+        if skip > 0 and end - count * 3600 <= skip_hour < end and skip_hour not in covered:
+            detail += f'; backup skipped at {time.strftime("%F %H:%M", time.localtime(skip))} (held by {holder})'
+    print('WARN' if missed >= warn else 'OK')
+    print(detail)
+PY
+)
+row "${slots[0]:-WARN}" "hourly slots" "${slots[1]:-unknown}"
+
+# --- quick chain and the most recent hourly lock skip
+quick=$(epochf "$GB_STATE/last-success-quick"); quick_limit=$(quick_max_age_s)
+if [[ "$QUICK_EVERY_MIN" == 0 ]]; then row OK "quick chain" "disabled (QUICK_EVERY_MIN=0)"
+elif isnum "$quick"; then
+  if (( now - quick >= quick_limit )); then row WARN "quick chain" "last complete quick backup $(ago "$quick") (limit $(( quick_limit / 60 )) min)"
+  else row OK "quick chain" "complete $(ago "$quick")"; fi
+elif isnum "$first" && (( now - first < 7200 )); then row OK "quick chain" "none yet (first-start grace)"
+else row WARN "quick chain" "none yet (first start $(ago "$first"))"; fi
+if skipped_backup; then
+  row WARN "skipped backup" "an hourly backup gave up waiting for the lock at $(at "$SKIP_TIME") (held by $SKIP_HOLDER); the next hourly will retry"
+else row OK "skipped backup" "none pending"; fi
+
 # --- last check (last-check.result from check.sh if present, else state/last-check)
 lc="$GB_STATE/last-check.result"
-cres=$(kv_get "$lc" result); ct=$(kv_epoch "$lc" time); cpr=$(kv_get "$lc" pruned)
+cres=$(kv_get "$lc" result); ct=$(kv_epoch "$lc" time); cpr=$(kv_get "$lc" pruned); cskip=$(kv_get "$lc" prune_skip)
+[[ "$cskip" =~ ^(latch|last-backup-not-complete|check-failed)$ ]] || cskip=""
 [[ "$cres" =~ ^(ok|failed|skipped)$ ]] || cres=""
 isnum "$ct" || ct=$(epochf "$GB_STATE/last-check")
 pr=""; case "$cpr" in 1) pr=", pruned";; 0) pr=", prune skipped";; esac
-if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then row PROBLEM "last check" "restic check FAILED (latch state/CHECK_FAILED; prune blocked until a check passes): see the log, docs/runbooks if present, then ./check.sh"
-elif [[ "$cres" == failed ]]; then row PROBLEM "last check" "FAILED at $(at "$ct"); see logs/backup-$(date +%Y-%m).log"
+if [[ "$cpr" == 0 || -n "$cskip" ]]; then
+  since=$(epochf "$GB_STATE/prune-skipped-since")
+  days=$(num_ok "$PRUNE_SKIP_PROBLEM_DAYS"); days=${days:-3}
+  # Compare days rather than multiplying a configurable value by seconds.
+  severity=WARN
+  if isnum "$since" && (( (now - since) / 86400 >= days )); then severity=PROBLEM; fi
+  pr=", prune skipped (${cskip:-unknown}); since $(at "$since") ($(ago "$since"))"
+fi
+if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then row PROBLEM "last check" "restic check FAILED (latch state/CHECK_FAILED; prune blocked until a check passes)$pr: see the log, docs/runbooks if present, then ./check.sh"
+elif [[ "$cres" == failed ]]; then row PROBLEM "last check" "FAILED at $(at "$ct")$pr; see logs/backup-$(date +%Y-%m).log"
+elif [[ "$cpr" == 0 || -n "$cskip" ]]; then
+  row "$severity" "last check" "${cres:-unknown} $(ago "$ct")$pr"
 elif isnum "$ct"; then
   if (( now - ct >= 48 * 3600 )); then row WARN "last check" "$(ago "$ct") (expected daily at ${DAILY_CHECK_AT:-04:40}); is the scheduler running?"
   else row OK "last check" "${cres:-ok} $(ago "$ct")$pr"; fi
@@ -134,9 +216,9 @@ weekly=""; [[ "${TEST_RESTORE_WEEKDAY:-}" =~ ^[0-6]$ ]] && weekly=1
 if [[ "$tres" == failed ]]; then row PROBLEM "test restore" "FAILED at $(at "$tt") (${tf:-?} files restored, ${tm:-?} mismatches): see state/test-restore-result.txt and the log; rerun ./test-restore.sh"
 elif isnum "$tt"; then
   d=$(( (now - tt) / 86400 ))
-  if (( d > 35 )) || { [[ -n "$weekly" ]] && (( d > 10 )); }; then row WARN "test restore" "last OK one is $d days old (expected $([[ -n $weekly ]] && echo weekly || echo monthly)); run ./test-restore.sh"
+  if (( d > TEST_RESTORE_MAX_DAYS )); then row WARN "test restore" "last OK one is $d days old (expected $([[ -n $weekly ]] && echo weekly || echo monthly)); run ./test-restore.sh"
   else row OK "test restore" "ok $(ago "$tt")${tf:+ ($tf files verified, ${tm:-0} mismatches)}"; fi
-elif [[ -n "$ok_t" ]] && isnum "$first" && (( now - first > 35 * 86400 )); then row WARN "test restore" "never succeeded, $(( (now - first) / 86400 )) days after install: run ./test-restore.sh"
+elif [[ -n "$ok_t" ]] && isnum "$first" && (( now - first > TEST_RESTORE_FIRST_DAYS * 86400 )); then row WARN "test restore" "no test restore has ever succeeded, $(( (now - first) / 86400 )) days after install; run ./test-restore.sh"
 else row OK "test restore" "not yet (runs once after the first hourly backup, then $([[ -n $weekly ]] && echo weekly || echo monthly))"; fi
 
 # --- Drive report upload (state/report-upload.status from report.sh)
@@ -150,9 +232,20 @@ else row OK "drive report" "no upload yet (after the next hourly backup)"; fi
 
 # --- expected bots (EXPECTED_BOTS roster vs the latest server-side export)
 eb=$("$GB_DIR/expected-bots.sh" 2>/dev/null); erc=$?
+if (( ${#EXPECTED_BOTS[@]} == 0 )); then
+  suggested=$("$GB_DIR/expected-bots.sh" --suggest 2>/dev/null); src=$?
+  if (( src == 2 )); then
+    eb="no roster configured (no server-side export on this box)"
+  elif (( src == 0 )) && [[ "$suggested" == EXPECTED_BOTS=\(\)* ]]; then
+    eb="no roster configured (no active exported bots)"
+  elif (( src == 0 )) && [[ "$EXPECTED_BOTS_REQUIRED" != 0 ]]; then
+    erc=1
+    eb="no roster configured: bots could silently drop out of the export unnoticed; run ./expected-bots.sh --suggest and paste the result into config.env (EXPECTED_BOTS)"
+  elif (( src == 1 )); then eb="${suggested%%$'\n'*}"; erc=1; fi
+fi
 case "$erc" in 0) row OK "expected bots" "$eb";; 1) row WARN "expected bots" "$eb";; *) row WARN "expected bots" "${eb:-check failed}";; esac
 
-# --- daily export (newest active per-bot check)
+# --- daily export (every active per-bot check)
 ef=$("$GB_DIR/export-freshness.sh" 2>/dev/null); erc=$?
 ef=${ef%%$'\n'*}
 case "$erc" in
@@ -165,6 +258,14 @@ case "$erc" in
       row WARN "daily export" "$ef"
     fi;;
   *) row WARN "daily export" "${ef:-check failed}";;
+esac
+
+# --- export warnings (INDEX.md; diagnostic only)
+ew=$("$GB_DIR/export-freshness.sh" --warnings 2>/dev/null); erc=$?
+case "$erc" in
+  0) row OK "export warnings" "$ew";;
+  2) row OK "export warnings" "no export yet";;
+  *) row WARN "export warnings" "${ew:-check failed}";;
 esac
 
 # --- output

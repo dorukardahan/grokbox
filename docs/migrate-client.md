@@ -25,7 +25,7 @@ source ./lib.sh; set +e; trap - ERR
 OLD="rclone:gdrive:GrokBox/restic"; NEW="rclone:gdrive2:GrokBox-v2/restic"
 R -r "$NEW" init --from-repo "$OLD" --from-password-file "$RESTIC_PASSWORD_FILE" --copy-chunker-params
 R -r "$NEW" copy --from-repo "$OLD" --from-password-file "$RESTIC_PASSWORD_FILE"   # may take hours; resumable
-R -r "$NEW" snapshots | tail -3
+R -r "$NEW" snapshots --no-lock | tail -3
 ```
 `--copy-chunker-params` keeps deduplication identical, so the next backup adds only changes. If `copy` is interrupted run it again.
 (If history is not needed: skip `copy`; the first backup re-uploads everything.)

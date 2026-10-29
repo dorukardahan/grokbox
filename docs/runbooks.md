@@ -125,7 +125,7 @@ Because `prune` replaced the repository index files when it deleted the packs, r
 R unlock
 R_TIMEOUT=8h R repair index
 R_TIMEOUT=8h R check --read-data-subset "$CHECK_SUBSET"
-R snapshots --host "$BACKUP_HOST"
+R snapshots --no-lock --host "$BACKUP_HOST"
 ```
 
 ### Step 5: Protect recovered snapshots before resuming
@@ -160,7 +160,7 @@ cd /workspace/grokbox
 Or print snapshot counts per host:
 ```bash
 source ./lib.sh; set +e; trap - ERR
-R snapshots --json | python3 -c '
+R snapshots --no-lock --json | python3 -c '
 import collections, json, sys
 c = collections.Counter(s.get("hostname", "?") for s in json.load(sys.stdin))
 for h, n in sorted(c.items()): print(f"{h}: {n} snapshots")
@@ -209,7 +209,7 @@ If snapshots were already written under `<wrong-host>` and you want them merged 
      ```
 4. **Verify, release `backup.lock`, and resume:**
    ```bash
-   R snapshots --host "$BACKUP_HOST"
+   R snapshots --no-lock --host "$BACKUP_HOST"
    rm -f "$GB_STATE/PAUSE"
    exec 9>&-
    ./backup.sh

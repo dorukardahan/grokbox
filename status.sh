@@ -12,6 +12,10 @@ R_TIMEOUT=300   # status must answer quickly even if Drive hangs
 ts(){ [[ -s "$1" ]] && date -d "@$(cat "$1")" '+%F %H:%M %Z' || echo never; }
 if [[ "${1:-}" == --ack ]]; then alert_ack; exit 0; fi   # under state/alert.lock; also starts a new dedupe incident
 problems=0
+if [[ -z "$(alert_channels)" && "$ALERT_CHANNEL_REQUIRED" != 0 ]]; then
+  problems=1
+  echo "!! NO ALERT CHANNEL configured: nobody is told about failures (see docs/health-and-alerts.md, ./test-alert.sh)"
+fi
 if [[ -s "$GB_STATE/ALERT" ]]; then
   problems=1
   echo "!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!"
@@ -30,13 +34,22 @@ echo "Last hourly snapshot:   $(ts "$GB_STATE/last-success")"
 echo "Last quick snapshot:    $(ts "$GB_STATE/last-success-quick")   (every ${QUICK_EVERY_MIN} min)"
 echo "Last check:             $(ts "$GB_STATE/last-check")"
 echo "Last test restore OK:   $(ts "$GB_STATE/last-test-restore")$( [[ -s $GB_STATE/test-restore-result.txt ]] && echo "   result: $(sed -n 2p "$GB_STATE/test-restore-result.txt")")"
-for k in last-success:hourly:$ALERT_NO_SUCCESS_HOURS last-success-quick:quick:2; do
+quick_limit=$(quick_max_age_s)
+for k in last-success:hourly:$(( ALERT_NO_SUCCESS_HOURS * 3600 )) last-success-quick:quick:$quick_limit; do
   f=${k%%:*}; r=${k#*:}; lbl=${r%%:*}; lim=${r#*:}
   [[ "$f" == last-success-quick && "$QUICK_EVERY_MIN" == 0 ]] && continue
   [[ -s "$GB_STATE/$f" ]] || continue
-  age_h=$(( ( $(date +%s) - $(cat "$GB_STATE/$f") ) / 3600 ))
-  (( age_h >= lim )) && { problems=1; echo "!! WARNING: last successful $lbl run is ${age_h}h old"; }
+  stamp=$(epoch_file "$GB_STATE/$f"); [[ -n "$stamp" ]] || continue
+  age_s=$(( $(date +%s) - stamp ))
+  (( age_s >= lim )) && { problems=1; echo "!! WARNING: last successful $lbl run is $(( age_s / 3600 ))h old"; }
 done
+if skipped_backup; then
+  problems=1; echo "!! hourly backup skipped at $(date -d "@$SKIP_TIME" '+%F %H:%M %Z') (held by $SKIP_HOLDER); the next hourly will retry"
+fi
+prune_skip=$(kv_get "$GB_STATE/last-check.result" prune_skip)
+if [[ "$prune_skip" =~ ^(latch|last-backup-not-complete|check-failed)$ ]]; then
+  problems=1; echo "!! check: prune skipped ($prune_skip); repository keeps growing until a complete hourly backup"
+fi
 now=$(date +%s); first=$(cat "$GB_STATE/first-start" 2>/dev/null || echo "")
 if [[ ! -s "$GB_STATE/last-success" ]]; then
   if [[ -n "$first" ]] && (( now - first >= ${FIRST_SUCCESS_GRACE_HOURS:-2} * 3600 )); then
@@ -65,11 +78,11 @@ if [[ "$(kv_get "$GB_STATE/report-upload.status" result)" == failed ]]; then
   problems=1; echo "!! Drive report: $([[ "$(kv_get "$GB_STATE/report-upload.status" stage)" == build ]] && echo build || echo upload) of latest-backup-report.txt FAILED at $(date -d "@$(kv_epoch "$GB_STATE/report-upload.status" time)" '+%F %H:%M %Z' 2>/dev/null || echo ?) (see $LOG; retried after the next hourly backup)"; fi
 if [[ -e "$GB_STATE/CHECK_FAILED" ]]; then problems=1; echo "!! CHECK FAILED latch set: prune blocked until a passing integrity check"; fi
 if [[ -e "$SQLITE_LATCH" ]]; then problems=1; echo "!! SQLITE LATCH set ($(ts "$SQLITE_LATCH")): SQLite staging failed; forget/prune blocked until a fully successful hourly backup"; fi
-if [[ -s "$GB_STATE/last-success" ]]; then   # test restore: monthly, so allow 35 days (grace counted from first start)
+if [[ -s "$GB_STATE/last-success" ]]; then   # same test-restore age and first-start grace as doctor.sh
   if [[ -s "$GB_STATE/last-test-restore" ]]; then
     tr_age=$(( (now - $(cat "$GB_STATE/last-test-restore")) / 86400 ))
-    (( tr_age > 35 )) && { problems=1; echo "!! last successful test restore is ${tr_age} days old (expected monthly)"; }
-  elif [[ -n "$first" ]] && (( now - first > 35 * 86400 )); then
+    (( tr_age > TEST_RESTORE_MAX_DAYS )) && { problems=1; echo "!! last successful test restore is ${tr_age} days old (expected $([[ "$TEST_RESTORE_WEEKDAY" =~ ^[0-6]$ ]] && echo weekly || echo monthly))"; }
+  elif [[ -n "$first" ]] && (( now - first > TEST_RESTORE_FIRST_DAYS * 86400 )); then
     problems=1; echo "!! no successful test restore yet, $(( (now - first) / 86400 )) days after install (run check.sh --test-restore)"; fi
 fi
 if [[ "${1:-}" == --local ]]; then echo "Overall: $([[ $problems == 0 ]] && echo OK || echo ATTENTION NEEDED)"; exit 0; fi

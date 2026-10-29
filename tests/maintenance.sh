@@ -10,6 +10,7 @@
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-maint.XXXXXX")"
+export RESTIC_CACHE_DIR="$TMP/cache"
 [[ "$TMP" == /tmp/* || "$TMP" == "${TMPDIR:-/nonexistent}"/* ]] || { echo "refusing: temp dir $TMP is not under /tmp"; exit 1; }
 cleanup() { [[ -n "${KEEP_TMP:-}" ]] && { echo "kept $TMP"; return; }
   chmod -R u+rwX "$TMP" 2>/dev/null || true; rm -rf "$TMP"; }
@@ -38,6 +39,7 @@ GB_SECRETS="$TMP/secrets"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
 export AGENTS_DIR="$TMP/agents"
+export DELETED_BOTS_FILE="$TMP/no-deleted-agents.json"
 export RESTIC_REPOSITORY="$REPO"
 export RESTIC_PASSWORD_FILE="$PASSF"
 BACKUP_ROOTS=("$SRC")

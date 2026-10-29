@@ -6,6 +6,7 @@
 set -Eeuo pipefail
 REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/grokbox-health.XXXXXX")"
+export RESTIC_CACHE_DIR="$TMP/cache"
 [[ "$TMP" == /tmp/* || "$TMP" == "${TMPDIR:-/nonexistent}"/* ]] || { echo "refusing: temp dir $TMP is not under /tmp"; exit 1; }
 SCHED_CFG=""; CHILDREN=()
 cleanup() { local p; for p in "${CHILDREN[@]}"; do kill -- "-$p" 2>/dev/null || kill "$p" 2>/dev/null || true; wait "$p" 2>/dev/null || true; done
@@ -69,6 +70,8 @@ GB_SECRETS="$SEC"
 GB_STATE="$TMP/state"; GB_LOGS="$TMP/logs"; GB_STAGING="$TMP/staging"; GB_CACHE="$TMP/cache"
 source "$REPO_DIR/config.env.example"
 export AGENTS_DIR="$TMP/agents"
+ALERT_CHANNEL_REQUIRED=0
+BACKUP_HOST=testhost
 export RESTIC_REPOSITORY="$REPO"
 export SERVER_EXPORT_DIR="$SE"
 DELETED_BOTS_FILE="$TMP/deleted-agents.json"
@@ -111,8 +114,11 @@ nalerts() { [[ -f "$TMP/state/ALERT" ]] || { echo 0; return; }; grep -c "$1" "$T
 
 step "lib.sh: kv helpers, bounded numbers, weekly slot"
 run_ok "lib.sh sources with the example defaults (new settings get defaults)" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && "$TEST_RESTORE_WEEKDAY" == 0 && "$DRIVE_REPORT" == 1 && ${#EXPECTED_BOTS[@]} == 0 && "$EXPECTED_BOTS_GRACE_MIN" == 60 ]]' _ "$REPO_DIR"
-old=$(mkcfg old 'unset EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
-run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
+old=$(mkcfg old 'unset PRUNE_SKIP_PROBLEM_DAYS HOURLY_MISS_WARN HOURLY_SLOT_WINDOW_H ALERT_NTFY_URL ALERT_WEBHOOK_URL ALERT_CHANNEL_REQUIRED EXPORT_MISSED_HOURS ALERT_HOOK ALERT_HOOK_TIMEOUT ALERT_DEDUPE_HOURS DRIVE_REPORT TEST_RESTORE_WEEKDAY TEST_RESTORE_AT EXPECTED_BOTS EXPECTED_BOTS_REQUIRED EXPECTED_BOTS_MAX_HOURS EXPECTED_BOTS_GRACE_MIN DELETED_BOTS_FILE RETIRED_BOTS AGENTS_DIR')
+run_ok "older config gets weekly restore age 10 and first-success grace 3" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$TEST_RESTORE_MAX_DAYS" == 10 && "$TEST_RESTORE_FIRST_DAYS" == 3 ]]' _ "$REPO_DIR"
+run_ok "older config defaults to requiring an expected-bot roster" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$EXPECTED_BOTS_REQUIRED" == 1 ]]' _ "$REPO_DIR"
+run_ok "older config gets prune and hourly visibility defaults" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ "$PRUNE_SKIP_PROBLEM_DAYS" == 3 && "$HOURLY_MISS_WARN" == 1 && "$HOURLY_SLOT_WINDOW_H" == 24 ]]' _ "$REPO_DIR"
+run_ok "an older config.env without the new settings still sources (defaults filled in)" env GB_CONFIG="$old" bash -c 'source "$1/lib.sh"; [[ -z "$ALERT_NTFY_URL" && -z "$ALERT_WEBHOOK_URL" && "$ALERT_CHANNEL_REQUIRED" == 1 && "$EXPORT_MISSED_HOURS" == 26 && "$ALERT_DEDUPE_HOURS" == 24 && ${#EXPECTED_BOTS[@]} == 0 && ${#RETIRED_BOTS[@]} == 0 && "$DELETED_BOTS_FILE" == /home/box/agent-data/deleted-agents.json && "$AGENTS_DIR" == /home/box/agent-data/agents ]]' _ "$REPO_DIR"
 v=$(bash -c 'source "$1/lib.sh"; kv_write "$GB_STATE/kv.test" "result=ok" "time=42" "note=a=b"; kv_get "$GB_STATE/kv.test" note; kv_get "$GB_STATE/kv.test" missing; kv_get "$GB_STATE/nofile" x; echo end' _ "$REPO_DIR")
 check "kv_write/kv_get round trip; missing key/file give empty, never fail" test "$v" = "a=b
 end"
@@ -126,7 +132,7 @@ check "weekly slot: today's weekday before TEST_RESTORE_AT -> a week ago" test "
 check "weekly slot: tomorrow's weekday -> 6 days ago" test "$(slot 3 "$wdn" 00:00)" = "$(TZ=UTC date -d '-6 days' +%F)"
 check "weekly slot: empty TEST_RESTORE_WEEKDAY -> off (prints nothing)" test -z "$(slot 4 '""' 00:00)"
 
-step "alert dedupe (once per incident, numbers ignored, locked) + status.sh --ack starts a new incident"
+step "alert dedupe (once per incident, volatile numbers ignored, locked) + status.sh --ack starts a new incident"
 alert_in "$GB_CONFIG" "dup test message"; alert_in "$GB_CONFIG" "dup test message"; alert_in "$GB_CONFIG" "another message"
 check "two identical alerts + one other -> 2 lines in state/ALERT" test "$(wc -l < "$TMP/state/ALERT")" = 2
 check "...and 2 lines in logs/alerts.log" test "$(grep -c 'test message\|another message' "$TMP/logs/alerts.log")" = 2
@@ -156,6 +162,20 @@ check "an alert whose age grows every hour is ONE incident: 1 line in state/ALER
 check "...the repeats are logged with their current text" grep -q 'repeat 3.*held for 15h' "$LOGF"
 alert_in "$GB_CONFIG" "backup.lock held for 15h by: 4242 check.sh (past job timeout plus grace)"
 check "a different job in the text is a different incident" test "$(nalerts 'held for')" = 2
+for pair in 'bot-10 bot-30' 'Name2 Name3' 'v2 v3' 'abc123 abc456' 'bot_10 bot_30' 'bot.10 bot.30'; do
+  read -r first second <<<"$pair"
+  alert_in "$GB_CONFIG" "$first missing"; alert_in "$GB_CONFIG" "$second missing"
+  check "identifier digits distinguish $first from $second" test "$(grep -F -c -e "$first missing" -e "$second missing" "$TMP/state/ALERT")" = 2
+done
+alert_in "$GB_CONFIG" 'operation failed rc=1 at line 45 (pid 123)'
+alert_in "$GB_CONFIG" 'operation failed rc=2 at line 46 (pid 456)'
+check "return codes, line numbers and pids dedupe as one incident" test "$(nalerts 'operation failed')" = 1
+alert_in "$GB_CONFIG" 'sample at 2026-01-02 12:00:01 2026-01-02T12:01:01Z. failed'
+alert_in "$GB_CONFIG" 'sample at 2026-03-04 13:22:59 2026-03-04T13:24:59Z. failed'
+check "different timestamps dedupe as one incident" test "$(nalerts 'sample at')" = 1
+alert_in "$GB_CONFIG" 'usage 13.5MB (80%) over 12 files, 2 days, counts 1 2 3.'
+alert_in "$GB_CONFIG" 'usage 14.6MB (90%) over 15 files, 3 days, counts 4 5 6.'
+check "sizes, percentages, counts and adjacent numbers dedupe as one incident" test "$(nalerts 'usage')" = 1
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 for _ in $(seq 1 20); do alert_in "$GB_CONFIG" "parallel storm" & done; wait
 check "20 concurrent identical alerts: exactly 1 recorded, 20 counted (state/alert.lock serializes them)" all test "$(nalerts 'parallel storm')" = 1 --and-- grep -q ' 20$' "$TMP/state/alert-seen" --and-- test "$(wc -l < "$TMP/state/alert-seen")" = 1
@@ -184,6 +204,78 @@ chmod +x "$TMP/hook-recurse.sh"; mkcfg recurse "ALERT_HOOK='$TMP/hook-recurse.sh
 t0=$(now_s); alert_in "$TMP/config-recurse.env" "outer alert"; t1=$(now_s)
 checkx "a hook that raises an alert does not run the hook again and does not deadlock on the alert lock (ran once, both recorded, $((t1-t0)) s)" 'test "$(grep -c "^ran$" "$TMP/hook.out")" = 1 && grep -q "raised from inside the hook" "$TMP/state/ALERT" && grep -q "outer alert" "$TMP/state/ALERT" && test $((t1 - t0)) -lt 20'
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+
+step "built-in alert channels and synchronous test alert (fake curl, no network)"
+mkdir -p "$TMP/alertbin" "$TMP/curl-calls"
+cat > "$TMP/alertbin/curl" <<'FAKE'
+#!/usr/bin/env python3
+import json, os, pathlib, sys
+args = sys.argv[1:]
+root = pathlib.Path(os.environ["FAKE_ALERT_DIR"])
+n = len(list(root.glob("body.*"))) + 1
+config = sys.stdin.read()
+(root / f"config.{n}").write_text(config)
+(root / f"argv.{n}").write_text(json.dumps(args))
+body = pathlib.Path(args[args.index("--data-binary") + 1][1:])
+(root / f"body.{n}").write_bytes(body.read_bytes())
+(root / f"mode.{n}").write_text(oct(body.stat().st_mode & 0o777))
+# Either stream can echo a secret URL: neither should reach logs or the terminal.
+print(config)
+print(config, file=sys.stderr)
+sys.exit(int(os.environ.get("FAKE_CURL_RC", "0")))
+FAKE
+chmod +x "$TMP/alertbin/curl"
+export FAKE_ALERT_DIR="$TMP/curl-calls"
+export PATH="$TMP/alertbin:$PATH"
+acfg=$(mkcfg channels "GB_STATE=$TMP/state-alert" "GB_LOGS=$TMP/logs-alert" \
+  'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
+  'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"' \
+  "ALERT_HOOK='cat >> $TMP/channel-hook.out'")
+payload=$'channel message with "quotes", backslash \\ and\na second line'
+run_ok "real alert with all three channels succeeds" alert_in "$acfg" "$payload"
+check "ntfy receives exact text; webhook JSON matches; curl argv contains no URL or message" \
+  python3 - "$FAKE_ALERT_DIR" "$payload" <<'PY'
+import json, pathlib, sys
+root = pathlib.Path(sys.argv[1]); text = (root / "body.1").read_text()
+assert text.endswith(sys.argv[2])
+assert json.loads((root / "body.2").read_text()) == {"text": text}
+for n, kind in ((1, "text/plain"), (2, "application/json")):
+    args = json.loads((root / f"argv.{n}").read_text())
+    assert args[args.index("-K") + 1] == "-"
+    assert args[args.index("--request") + 1] == "POST"
+    assert f"Content-Type: {kind}" in args
+    assert all(a in args for a in ("--disable", "--fail", "--silent", "--show-error", "--max-time"))
+    assert "https://alerts.example.invalid/" in (root / f"config.{n}").read_text()
+    assert not any("secret-abc" in a or "channel message" in a for a in args)
+    assert (root / f"mode.{n}").read_text() == "0o600"
+PY
+alert_in "$acfg" "$payload" >"$TMP/send.out" 2>&1
+check "a repeated alert calls neither curl nor the hook again" all test "$(find "$FAKE_ALERT_DIR" -name 'body.*' | wc -l)" = 2 --and-- test "$(grep -c 'channel message' "$TMP/channel-hook.out")" = 1
+check "real delivery status records success, epoch and only channel names" all grep -qx 'result=ok' "$TMP/state-alert/alert-delivery.status" --and-- grep -qx 'channels=ntfy+webhook+hook' "$TMP/state-alert/alert-delivery.status" --and-- grep -qE '^time=[0-9]+$' "$TMP/state-alert/alert-delivery.status"
+rc=0; FAKE_CURL_RC=22 alert_in "$acfg" 'delivery fails' >"$TMP/send.out" 2>&1 || rc=$?
+check "curl failure never fails alert(), still tries other channels, records failed delivery" all test "$rc" = 0 --and-- grep -qx 'result=failed' "$TMP/state-alert/alert-delivery.status" --and-- grep -q 'webhook: FAILED (rc=22)' "$TMP/logs-alert/alert-hook.log" --and-- grep -q 'delivery fails' "$TMP/channel-hook.out"
+GB_CONFIG="$acfg" "$REPO_DIR/doctor.sh" >"$TMP/alert-doctor.out" 2>&1 || true
+check "doctor warns about last failed real delivery, with next step" grep -q '^WARN *alert channel: last alert delivery FAILED .*see logs/alert-hook.log, run ./test-alert.sh' "$TMP/alert-doctor.out"
+tcfg="$TMP/config-test-channels.env"
+{ cat "$acfg"; echo "GB_STATE=$TMP/state-alert-test"; } > "$tcfg"
+run_ok "test-alert succeeds synchronously through all configured channels" env GB_CONFIG="$tcfg" "$REPO_DIR/test-alert.sh"
+cp "$TMP/last.out" "$TMP/test-alert.out"
+check "test-alert prints one success line per channel and sends marked test text" all grep -qx 'ntfy: ok' "$TMP/test-alert.out" --and-- grep -qx 'webhook: ok' "$TMP/test-alert.out" --and-- grep -qx 'hook: ok' "$TMP/test-alert.out" --and-- grep -q 'TEST ALERT from testhost: if you can read this, alerting works' "$TMP/channel-hook.out"
+check "test success records result/time without incident or real-delivery state" all grep -qx 'result=ok' "$TMP/state-alert-test/alert-test.status" --and-- grep -qE '^time=[0-9]+$' "$TMP/state-alert-test/alert-test.status" --and-- test ! -e "$TMP/state-alert-test/ALERT" --and-- test ! -e "$TMP/state-alert-test/alert-delivery.status"
+before=$(wc -l < "$TMP/logs-alert/alerts.log")
+rc=0; FAKE_CURL_RC=22 GB_CONFIG="$tcfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-fail.out" 2>&1 || rc=$?
+check "failed test exits 1, reports per-channel rc, still sends hook; no incident written" all test "$rc" = 1 --and-- grep -qx 'ntfy: FAILED (rc=22)' "$TMP/test-alert-fail.out" --and-- grep -qx 'webhook: FAILED (rc=22)' "$TMP/test-alert-fail.out" --and-- grep -qx 'hook: ok' "$TMP/test-alert-fail.out" --and-- grep -qx 'result=failed' "$TMP/state-alert-test/alert-test.status" --and-- test ! -e "$TMP/state-alert-test/ALERT" --and-- test "$(wc -l < "$TMP/logs-alert/alerts.log")" = "$before"
+GB_CONFIG="$tcfg" "$REPO_DIR/doctor.sh" >"$TMP/alert-test-doctor.out" 2>&1 || true
+check "doctor warns when the last test failed" grep -q '^WARN *alert channel: configured (ntfy+webhook+hook), last alert test FAILED' "$TMP/alert-test-doctor.out"
+rc=0; FAKE_CURL_RC=28 GB_CONFIG="$tcfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-timeout.out" 2>&1 || rc=$?
+check "curl timeout is a failed test with rc 28" all test "$rc" = 1 --and-- grep -qx 'ntfy: FAILED (rc=28)' "$TMP/test-alert-timeout.out"
+thcfg=$(mkcfg test-hook "GB_STATE=$TMP/state-test-hook" "ALERT_HOOK='exit 7'")
+rc=0; GB_CONFIG="$thcfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-hook.out" 2>&1 || rc=$?
+check "hook-only test returns 1 and reports the hook rc" all test "$rc" = 1 --and-- grep -qx 'hook: FAILED (rc=7)' "$TMP/test-alert-hook.out"
+ncfg=$(mkcfg no-channels "GB_STATE=$TMP/state-alert-none")
+rc=0; GB_CONFIG="$ncfg" "$REPO_DIR/test-alert.sh" >"$TMP/test-alert-none.out" 2>&1 || rc=$?
+check "no-channel test exits 3 with setup guidance and no incident" all test "$rc" = 3 --and-- grep -qx 'no alert channel configured: set ALERT_NTFY_URL, ALERT_WEBHOOK_URL or ALERT_HOOK in config.env, then rerun ./test-alert.sh' "$TMP/test-alert-none.out" --and-- test ! -e "$TMP/state-alert-none/ALERT"
+check "secret destinations never appear in logs, doctor or test-alert output" not grep -qE 'alerts\.example\.invalid|secret-abc' "$TMP/logs-alert/alert-hook.log" "$TMP/logs-alert"/backup-*.log "$TMP/logs-alert/alerts.log" "$TMP/alert-doctor.out" "$TMP/alert-test-doctor.out" "$TMP/test-alert"*.out "$TMP/send.out"
 
 step "expected-bot roster (expected-bots.sh): completeness, in-progress grace, no-export alert, stable alerts"
 rc=0; out=$("$REPO_DIR/expected-bots.sh") || rc=$?
@@ -405,8 +497,8 @@ efpos() {  # efpos AGE_A AGE_B [unreadable]: ages in hours
   python3 - "$EF/state/positions.json" "$@" <<'PYFIX'
 import json, sys, time
 stamp = lambda h: time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(time.time() - float(h)*3600))
-json.dump({"bot-a": {"name": "MainBot", "checked": stamp(sys.argv[2])},
-           "bot-b": {"name": "Helper Bot", "checked": stamp(sys.argv[3]), "unreadable": len(sys.argv) > 4}},
+json.dump({"abcdef01": {"name": "bot-a", "checked": stamp(sys.argv[2])},
+           "abcdef02": {"name": "bot-b", "checked": stamp(sys.argv[3]), "unreadable": len(sys.argv) > 4}},
           open(sys.argv[1], "w"))
 PYFIX
 }
@@ -415,26 +507,39 @@ efcheck() {  # efcheck EXPECTED_RC TEXT [flags]
   rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/export-freshness.sh" "$@") || rc=$?
   checkx "daily export: exit $want, $needle" 'test "$rc" = "$want" && [[ "$out" == *"$needle"* ]]'
 }
-efpos 2 40
-efcheck 0 'daily export OK (newest per-bot export check 2 h ago)'
+efpos 1 40
+efcheck 1 'daily export missed: 1 of 2 active bots were not exported in the last 26 h (oldest: bot-b 40 h)'
+checkx "mixed ages: only the stale bot is named" '[[ "$out" != *bot-a* ]]'
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+efcheck 1 'daily export missed' --alert
+check "mixed ages: stable alert names the stale bot, no age" grep -qF 'daily export missed: 1 of 2 active bots not exported within EXPORT_MISSED_HOURS=26 h: bot-b' "$TMP/state/ALERT"
+efpos 2 41
+efcheck 1 'daily export missed' --alert
+check "mixed ages: still one alert as ages grow" all test "$(nalerts 'daily export missed')" = 1 --and-- not grep -qE 'oldest|40 h|41 h|bot-a' "$TMP/state/ALERT"
+efpos 1 2
+efcheck 0 'daily export OK (all 2 active bots checked within 26 h, oldest 2 h ago)'
 efpos 40 50
-efcheck 1 'daily export missed: no bot was exported in the last 26 h'
+efcheck 1 'daily export missed: 2 of 2 active bots were not exported in the last 26 h (oldest: bot-b 50 h, bot-a 40 h)'
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
 efcheck 1 'daily export missed' --alert
 efpos 41 51
 efcheck 1 'daily export missed' --alert
-check "daily export alert dedupes as ages grow and contains no fixture ids/names" all test "$(nalerts 'daily export missed')" = 1 --and-- not grep -Eq 'bot-a|bot-b|MainBot|Helper Bot|41|51' "$TMP/state/ALERT"
-for shape in '{"agents":{"bot-b":{}}}' '{"bot-b":{}}' '["bot-b"]' '[{"id":"bot-b"}]'; do
+check "daily export alert dedupes as ages grow and sorts names alphabetically" all test "$(nalerts 'daily export missed')" = 1 --and-- grep -qF 'EXPORT_MISSED_HOURS=26 h: bot-a, bot-b' "$TMP/state/ALERT" --and-- not grep -Eq 'oldest|41 h|51 h' "$TMP/state/ALERT"
+for shape in '{"agents":{"abcdef02":{}}}' '{"abcdef02":{}}' '["abcdef02"]' '[{"id":"abcdef02"}]'; do
   echo "$shape" > "$TMP/daily-deleted.json"
   efc=$(mkcfg daily-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json")
   efpos 40 0; efcheck 1 'daily export missed'
+  efpos 1 40; efcheck 0 'all 1 active bots checked within 26 h'
 done
-for retired in 'helper-bot' 'BOT-B'; do
+for retired in 'BOT B' 'ABCDEF02'; do
   efc=$(mkcfg daily-retired "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""' "RETIRED_BOTS=(\"$retired\")")
+  efpos 40 0
   efcheck 1 'daily export missed'
+  efpos 1 40; efcheck 0 'all 1 active bots checked within 26 h'
 done
 efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
 efpos 40 0 unreadable; efcheck 1 'daily export missed'
+efpos 1 40 unreadable; efcheck 0 'all 1 active bots checked within 26 h'
 # Embedded deletion survives a missing/unreadable external deletion list.
 efc=$(mkcfg daily-embedded-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/no-deleted-list")
 efpos 40 0
@@ -442,18 +547,81 @@ python3 - "$EF/state/positions.json" <<'PYFIX'
 import json, sys
 p = sys.argv[1]
 with open(p) as f: pos = json.load(f)
-pos["bot-b"]["deleted"] = True
+pos["abcdef02"]["deleted"] = True
 with open(p, "w") as f: json.dump(pos, f)
 PYFIX
 efcheck 1 'daily export missed'
-echo '{"bot-b":{"deleted":true}}' > "$EF/state/positions.json"
+echo '{"abcdef02":{"deleted":true}}' > "$EF/state/positions.json"
 efcheck 0 'daily export: no active exported bots'
 
-echo '["bot-a"]' > "$TMP/daily-deleted.json"
+echo '["abcdef01"]' > "$TMP/daily-deleted.json"
 efc=$(mkcfg daily-deleted "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json")
 efcheck 0 'daily export: no active exported bots'
+efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+echo '{"abcdef01":{"name":"bot-a","checked":"invalid"},"abcdef02":{"name":"bot-b"}}' > "$EF/state/positions.json"
+efcheck 1 'oldest: bot-a unknown age, bot-b unknown age'
+echo '{"abcdef01-extra":{"checked":"invalid"}}' > "$EF/state/positions.json"
+efcheck 1 'oldest: abcdef01 unknown age'
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys, time
+json.dump({f"abcdef{i:02d}": {"name": f"bot-{chr(97+i)}", "checked":
+           time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(time.time() - (40+i)*3600))}
+           for i in range(8)}, open(sys.argv[1], "w"))
+PYFIX
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+efcheck 1 'oldest: bot-h 47 h, bot-g 46 h, bot-f 45 h, bot-e 44 h, bot-d 43 h, ... +3 more)' --alert
+check "many stale bots: alert has exactly five alphabetical names, no ages" all grep -qE 'daily export missed: 8 of 8 active bots not exported within EXPORT_MISSED_HOURS=26 h: bot-a, bot-b, bot-c, bot-d, bot-e$' "$TMP/state/ALERT" --and-- not grep -qE 'bot-f|bot-g|bot-h|oldest|more' "$TMP/state/ALERT"
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+for name in bot-1 bot-2; do
+  printf '{"abcdef01":{"name":"%s","checked":"invalid"}}\n' "$name" > "$EF/state/positions.json"
+  efcheck 1 'daily export missed' --alert
+done
+check "freshness alerts for bot-1 and bot-2 are distinct incidents" test "$(nalerts 'daily export missed')" = 2
+"$REPO_DIR/status.sh" --ack >/dev/null 2>&1
+
+step "export warnings and expected-bot roster suggestions"
+echo '{"abcdef01":{"name":"bot-a","warnings":["test warning"]},"abcdef02":{"name":"bot-b","deleted":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+efcheck 1 'export warnings: 1 active bot(s) with warnings (see staging/server-export/INDEX.md): bot-a' --warnings --alert
+check "warnings: no deleted name and no alert even with --alert" all test "$out" = 'export warnings: 1 active bot(s) with warnings (see staging/server-export/INDEX.md): bot-a' --and-- test ! -s "$TMP/state/ALERT"
+echo '{"abcdef02":{"deleted":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+efcheck 0 'no export warnings' --warnings
+echo '["abcdef02"]' > "$TMP/daily-deleted.json"
+efc=$(mkcfg warnings-filter "export SERVER_EXPORT_DIR=$EF" "DELETED_BOTS_FILE=$TMP/daily-deleted.json" 'RETIRED_BOTS=("BOT C")')
+echo '{"abcdef01":{"name":"bot-a"},"abcdef02":{"name":"bot-b","warnings":["ignored"]},"abcdef03":{"name":"bot-c","warnings":["ignored"]},"abcdef04":{"unreadable":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+efcheck 0 'no export warnings' --warnings
+echo '{"abcdef01":{"name":"bot-a"}}' > "$EF/state/positions.json"
+efcheck 0 'no export warnings' --warnings
+
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+json.dump({"abcdef01": {"name": "bot-a"}, "abcdef02": {"name": "bot-b"},
+           "abcdef03": {"name": "bot-c"}, "abcdef04": {"unreadable": True},
+           "abcdef05": {"name": "bot-e", "deleted": True}, "abcdef06": {},
+           "abcdef07": {"name": "bot space ' quote \" $() `literal` \\"}}, open(sys.argv[1], "w"))
+PYFIX
+rc=0; GB_CONFIG="$efc" "$REPO_DIR/expected-bots.sh" --suggest > "$TMP/suggest.env" || rc=$?
+check "suggest: exit 0 and review reminder" all test "$rc" = 0 --and-- grep -qx '# paste into config.env; review the list' "$TMP/suggest.env"
+suggest_roundtrip() {
+  bash -c 'source "$1"; printf "%s\0" "${EXPECTED_BOTS[@]}"' _ "$TMP/suggest.env" > "$TMP/suggest.values" || return 1
+  python3 - "$TMP/suggest.values" <<'PYFIX'
+import sys
+assert open(sys.argv[1], "rb").read().decode().split("\0")[:-1] == [
+    "abcdef06", "bot space ' quote \" $() `literal` \\", "bot-a"]
+PYFIX
+}
+check "suggest: sourceable Bash, sorted names/id fallback, literal shell characters, active bots only" suggest_roundtrip
+echo '{"abcdef01":{"deleted":true}}' > "$EF/state/positions.json"
+rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/expected-bots.sh" --suggest) || rc=$?
+checkx "suggest: no active bots yields an empty array" 'test "$rc" = 0 && [[ "$out" == EXPECTED_BOTS=\(\)* ]]'
+rm "$EF/state/positions.json"
+rc=0; out=$(GB_CONFIG="$efc" "$REPO_DIR/expected-bots.sh" --suggest) || rc=$?
+checkx "suggest: no export yet exits 2 with guidance" 'test "$rc" = 2 && [[ "$out" == "no server-side export yet" ]]'
+efcheck 2 'no server-side export yet' --warnings
+efpos 1 40
 efc=$(mkcfg daily-off "export SERVER_EXPORT_DIR=$EF" 'EXPORT_MISSED_HOURS=0')
 efcheck 0 'daily export check disabled'
+echo '{"abcdef01":{"name":"bot-a","warnings":["test warning"]}}' > "$EF/state/positions.json"
+efcheck 1 'export warnings: 1 active bot(s)' --warnings
 efc=$(mkcfg daily-export "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
 rm "$EF/state/positions.json"
 "$REPO_DIR/status.sh" --ack >/dev/null 2>&1
@@ -599,8 +767,139 @@ GB_CONFIG="$rcl" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "status.sh and doctor.sh show the build failure" all grep -q '!! Drive report: build of latest-backup-report.txt FAILED' "$TMP/status.out" --and-- grep -q '^WARN *drive report: latest-backup-report.txt could not be built' "$TMP/doc.out"
 rm -f "$TMP/state-rc/report-upload.status"
 
+step "doctor.sh: fixed-clock prune, hourly slots, quick chain and skipped backup diagnostics"
+V="$TMP/state-visibility"; mkdir -p "$V" "$TMP/clockbin"
+vc=$(mkcfg visibility "GB_STATE=$V")
+export FIXED_NOW=946902600
+cat > "$TMP/clockbin/date" <<'CLOCK'
+#!/usr/bin/env bash
+if [[ "${1:-}" == +%s ]]; then echo "$FIXED_NOW"; else exec /usr/bin/date "$@"; fi
+CLOCK
+chmod +x "$TMP/clockbin/date"
+hour=$(( FIXED_NOW / 3600 * 3600 ))
+vdoc() { PATH="$TMP/clockbin:$PATH" GB_CONFIG="${1:-$vc}" "$REPO_DIR/doctor.sh" >"$TMP/visibility.out" 2>&1 || true; }
+vstatus() { PATH="$TMP/clockbin:$PATH" GB_CONFIG="$vc" "$REPO_DIR/status.sh" --local >"$TMP/visibility-status.out" 2>&1; }
+vhistory() { local h; for h in {1..24}; do [[ "$h" == "${1:-0}" ]] || echo "$(( hour - h * 3600 + 1020 ))"; done > "$V/hourly-history"; }
+echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"
+echo "$(( FIXED_NOW - 60 ))" > "$V/last-success"
+echo "$FIXED_NOW" > "$V/last-success-quick"
+printf 'result=ok\ntime=%s\npruned=1\nprune_skip=\n' "$FIXED_NOW" > "$V/last-check.result"
+echo "$FIXED_NOW" > "$V/last-check"
+vhistory; vdoc
+check "all 24 completed hours covered -> hourly slots OK" grep -q '^OK *hourly slots: 0 missed of 24 completed hours' "$TMP/visibility.out"
+vhistory 3; vdoc
+missed_hour=$(TZ=UTC date -d "@$(( hour - 3 * 3600 ))" +%H:00)
+check "one hole -> hourly slots WARN naming that clock hour" grep -q "^WARN *hourly slots: 1 missed of 24 completed hours: $missed_hour" "$TMP/visibility.out"
+printf 'time=%s\nmode=auto\nreason=lock-busy\nholder=check.sh\nwaited=1200\n' "$(( hour - 3 * 3600 + 1200 ))" > "$V/backup-skipped"
+vdoc
+check "missed-hour detail names the recorded skip time and holder" grep -q '^WARN *hourly slots: .*backup skipped at .* (held by check.sh)' "$TMP/visibility.out"
+rm -f "$V/backup-skipped"
+vc2=$(mkcfg visibility-two "GB_STATE=$V" 'HOURLY_MISS_WARN=2')
+vdoc "$vc2"
+check "configured miss threshold tolerates one missed slot" grep -q '^OK *hourly slots: 1 missed of 24 completed hours' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-window "GB_STATE=$V" 'HOURLY_SLOT_WINDOW_H=2')
+vdoc "$vc2"
+check "configured two-hour window excludes the older hole" grep -q '^OK *hourly slots: 0 missed of 2 completed hours' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-local "GB_STATE=$V" 'export TZ=Asia/Kolkata')
+for h in {1..24}; do [[ "$h" == 3 ]] || echo "$(( FIXED_NOW - h * 3600 ))"; done > "$V/hourly-history"
+vdoc "$vc2"
+missed_hour=$(TZ=Asia/Kolkata date -d "@$(( FIXED_NOW - 3 * 3600 ))" +%H:00)
+check "slots and labels follow local clock hours in a half-hour time zone" grep -q "^WARN *hourly slots: 1 missed of 24 completed hours: $missed_hour" "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 7200 ))" > "$V/first-start"
+printf '%s\n' "$(( hour - 7200 + 1800 ))" "$(( hour - 3600 + 1800 ))" > "$V/hourly-history"
+vdoc
+check "two-hour-old install with two successes is not blamed for earlier hours" grep -q '^OK *hourly slots: 0 missed' "$TMP/visibility.out"
+rm -f "$V/hourly-history"; vdoc
+check "fresh install with missing history -> OK no history yet" grep -q '^OK *hourly slots: no history yet' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"; vdoc
+check "old install without history -> WARN with state path" grep -q '^WARN *hourly slots: no hourly history (state/hourly-history missing)' "$TMP/visibility.out"
+printf '%s\n1e9999\n' "$FIXED_NOW" > "$V/hourly-history"; vdoc
+check "garbled history -> same warning, no arithmetic failure" all grep -q '^WARN *hourly slots: no hourly history' "$TMP/visibility.out" --and-- not grep -q 'Traceback\|syntax error' "$TMP/visibility.out"
+vhistory 1
+echo "$FIXED_NOW" >> "$V/hourly-history"; vdoc
+check "a success in the current hour never fills a previous hole" grep -q '^WARN *hourly slots: 1 missed' "$TMP/visibility.out"
+vhistory
+echo "$(( FIXED_NOW - 3 * 3600 ))" > "$V/last-success-quick"; vdoc; vstatus
+check "stale quick chain -> WARN in doctor and status" all grep -q '^WARN *quick chain: last complete quick backup 3 h ago' "$TMP/visibility.out" --and-- grep -q '^!! WARNING: last successful quick run is 3h old' "$TMP/visibility-status.out"
+vc2=$(mkcfg visibility-slow-quick "GB_STATE=$V" 'QUICK_EVERY_MIN=90')
+vdoc "$vc2"
+check "three quick intervals extend the quick age threshold" grep -q '^OK *quick chain: complete 3 h ago' "$TMP/visibility.out"
+PATH="$TMP/clockbin:$PATH" GB_CONFIG="$vc2" "$REPO_DIR/status.sh" --local > "$TMP/visibility-status.out" 2>&1
+check "status shares the extended quick threshold" not grep -q '^!! WARNING: last successful quick run' "$TMP/visibility-status.out"
+echo "$FIXED_NOW" > "$V/last-success-quick"; vdoc
+check "fresh quick chain -> OK" grep -q '^OK *quick chain: complete 0 min ago' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-no-quick "GB_STATE=$V" 'QUICK_EVERY_MIN=0')
+vdoc "$vc2"
+check "disabled quick chain -> OK with explicit setting" grep -q '^OK *quick chain: disabled (QUICK_EVERY_MIN=0)' "$TMP/visibility.out"
+rm -f "$V/last-success-quick"; vdoc
+check "no quick success on old install -> WARN none yet" grep -q '^WARN *quick chain: none yet' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 3600 ))" > "$V/first-start"; vdoc
+check "no quick success within two hours of first-start -> OK none yet" grep -q '^OK *quick chain: none yet' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"
+printf 'result=ok\ntime=%s\npruned=0\nprune_skip=last-backup-not-complete\n' "$FIXED_NOW" > "$V/last-check.result"
+echo "$(( FIXED_NOW - 3600 ))" > "$V/prune-skipped-since"; vdoc; vstatus
+check "skipped prune -> WARN with reason and consecutive skip age" grep -q '^WARN *last check: .*prune skipped (last-backup-not-complete); since .* (1 h ago)' "$TMP/visibility.out"
+check "status flags the recorded prune skip reason" grep -q '^!! check: prune skipped (last-backup-not-complete); repository keeps growing' "$TMP/visibility-status.out"
+echo "$(( FIXED_NOW - 4 * 86400 ))" > "$V/prune-skipped-since"; vdoc
+check "four days without prune -> PROBLEM" grep -q '^PROBLEM *last check: .*prune skipped (last-backup-not-complete).*4 d ago' "$TMP/visibility.out"
+vc2=$(mkcfg visibility-prune-limit "GB_STATE=$V" 'PRUNE_SKIP_PROBLEM_DAYS=5')
+vdoc "$vc2"
+check "prune severity follows configured day threshold" grep -q '^WARN *last check: .*prune skipped' "$TMP/visibility.out"
+printf 'result=ok\ntime=1e9999\npruned=garbage\nprune_skip=garbage\n' > "$V/last-check.result"
+echo 999999999999999999999 > "$V/prune-skipped-since"; vdoc
+check "garbled prune state -> unknown, no crash" all grep -q '^OK *last check:' "$TMP/visibility.out" --and-- grep -q '^Overall:' "$TMP/visibility.out" --and-- not grep -q 'syntax error\|Traceback\|value too great' "$TMP/visibility.out"
+printf 'result=ok\ntime=%s\npruned=0\nprune_skip=latch\n' "$FIXED_NOW" > "$V/last-check.result"; vdoc
+check "valid skip with garbled age -> WARN unknown age" grep -q '^WARN *last check: .*prune skipped (latch); since ? (unknown)' "$TMP/visibility.out"
+printf 'result=ok\ntime=%s\npruned=1\nprune_skip=\n' "$FIXED_NOW" > "$V/last-check.result"
+printf 'time=%s\nmode=auto\nreason=lock-busy\nholder=check.sh\nwaited=1200\n' "$FIXED_NOW" > "$V/backup-skipped"
+vdoc; vstatus
+check "pending hourly lock skip -> doctor WARN with retry guidance" grep -q '^WARN *skipped backup: an hourly backup gave up waiting for the lock at .* (held by check.sh); the next hourly will retry' "$TMP/visibility.out"
+check "pending hourly lock skip -> status warning and attention" all grep -q '^!! hourly backup skipped at .* (held by check.sh)' "$TMP/visibility-status.out" --and-- grep -q '^Overall: ATTENTION NEEDED' "$TMP/visibility-status.out"
+echo "$(( FIXED_NOW + 1 ))" > "$V/last-success"; vdoc; vstatus
+check "newer success clears doctor skip warning" all grep -q '^OK *skipped backup: none pending' "$TMP/visibility.out" --and-- not grep -q '^WARN *skipped backup:' "$TMP/visibility.out"
+check "newer success clears status skip warning" not grep -q '^!! hourly backup skipped' "$TMP/visibility-status.out"
+printf 'time=1e9999\nholder=check.sh\n' > "$V/backup-skipped"; vdoc; vstatus
+check "garbled skip epoch is ignored by both diagnostics" all grep -q '^OK *skipped backup: none pending' "$TMP/visibility.out" --and-- not grep -q '^!! hourly backup skipped' "$TMP/visibility-status.out"
+
+step "doctor/status: shared test-restore age and first-success grace (fixed clock)"
+restore_health() {   # NAME WEEKDAY AGE_DAYS EXPECTED [MAX_DAYS]
+  local cfg name="$1" weekday="$2" age="$3" expected="$4"; shift 4
+  cfg=$(mkcfg "restore-$name" "GB_STATE=$V" "TEST_RESTORE_WEEKDAY='$weekday'" "$@")
+  echo "$(( FIXED_NOW - age * 86400 ))" > "$V/last-test-restore"
+  PATH="$TMP/clockbin:$PATH" GB_CONFIG="$cfg" "$REPO_DIR/doctor.sh" > "$TMP/restore-doc.out" 2>&1 || true
+  PATH="$TMP/clockbin:$PATH" GB_CONFIG="$cfg" "$REPO_DIR/status.sh" --local > "$TMP/restore-status.out" 2>&1
+  if [[ "$expected" == WARN ]]; then
+    check "$name: doctor and status warn at $age days" all grep -q "^WARN *test restore: last OK one is $age days old" "$TMP/restore-doc.out" --and-- grep -q "^!! last successful test restore is $age days old" "$TMP/restore-status.out"
+  else
+    check "$name: doctor and status accept $age days" all grep -q '^OK *test restore: ok' "$TMP/restore-doc.out" --and-- not grep -q '^!! last successful test restore' "$TMP/restore-status.out"
+  fi
+}
+restore_health weekly-old 0 11 WARN
+restore_health weekly-fresh 0 9 OK
+restore_health monthly-fresh '' 20 OK
+restore_health monthly-old '' 36 WARN
+restore_health explicit-old 0 4 WARN TEST_RESTORE_MAX_DAYS=3
+restore_health explicit-fresh 0 3 OK TEST_RESTORE_MAX_DAYS=3
+restore_health monthly-explicit '' 4 WARN TEST_RESTORE_MAX_DAYS=3
+rm -f "$V/last-test-restore"
+for days in 4 1; do
+  echo "$(( FIXED_NOW - days * 86400 ))" > "$V/first-start"
+  vdoc; vstatus
+  if (( days == 4 )); then
+    check "no first restore after 4 days: doctor and status warn" all grep -q '^WARN *test restore: no test restore has ever succeeded, 4 days after install; run ./test-restore.sh' "$TMP/visibility.out" --and-- grep -q '^!! no successful test restore yet, 4 days after install' "$TMP/visibility-status.out"
+  else
+    check "no first restore after 1 day: both allow grace" all grep -q '^OK *test restore: not yet' "$TMP/visibility.out" --and-- not grep -q '^!! no successful test restore yet' "$TMP/visibility-status.out"
+  fi
+done
+first_cfg=$(mkcfg restore-first "GB_STATE=$V" TEST_RESTORE_FIRST_DAYS=0)
+vdoc "$first_cfg"
+PATH="$TMP/clockbin:$PATH" GB_CONFIG="$first_cfg" "$REPO_DIR/status.sh" --local > "$TMP/restore-status.out" 2>&1
+check "explicit first-success grace 0 wins in both diagnostics" all grep -q '^WARN *test restore: no test restore has ever succeeded, 1 days after install' "$TMP/visibility.out" --and-- grep -q '^!! no successful test restore yet, 1 days after install' "$TMP/restore-status.out"
+rm -f "$V/last-success"; vdoc; vstatus
+check "no complete hourly backup: neither warns about a missing first restore" all grep -q '^OK *test restore: not yet' "$TMP/visibility.out" --and-- not grep -q '^!! no successful test restore yet' "$TMP/visibility-status.out"
+
 step "doctor.sh: PROBLEM / WARN / OK, exit codes, --json, status.sh --doctor, lock ownership, garbled state"
-D="$TMP/state-doc"; mkdir -p "$D"; dc=$(mkcfg doc "GB_STATE=$D")
+D="$TMP/state-doc"; mkdir -p "$D"; dc=$(mkcfg doc "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0')
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "fresh state: exit 2, scheduler NOT running, no backup yet, Overall: PROBLEM" all test "$rc" = 2 --and-- grep -q '^PROBLEM *scheduler: NOT running' "$TMP/doc.out" --and-- grep -q '^PROBLEM *last backup: no complete' "$TMP/doc.out" --and-- grep -q '^Overall: PROBLEM' "$TMP/doc.out"
@@ -611,18 +910,104 @@ check "status.sh --doctor delegates (same JSON shape and exit code)" all test "$
 # healthy: scheduler lock held by a live process, fresh heartbeat, fresh backup/check/test restore/quota sample
 ( exec 7>>"$D/scheduler.lock"; flock 7; exec sleep 120 ) & SP=$!; sleep 1
 now_s > "$D/scheduler.heartbeat"; now_s > "$D/last-success"; now_s > "$D/last-check"; now_s > "$D/last-test-restore"
+now_s > "$D/last-success-quick"
+for h in {1..24}; do echo "$(( $(now_s) / 3600 * 3600 - h * 3600 + 1200 ))"; done > "$D/hourly-history"
 printf 'drive_pct=20\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
+# Healthy diagnostics need every active bot fresh; roster onboarding is tested separately below.
+mkpos tid-2=3600
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "healthy state: exit 0, Overall: OK, no WARN/PROBLEM lines" all test "$rc" = 0 --and-- grep -q '^Overall: OK' "$TMP/doc.out" --and-- not grep -qE '^(WARN|PROBLEM)' "$TMP/doc.out"
-efpos 1 40
-defc=$(mkcfg doc-daily "GB_STATE=$D" "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""')
+check "no-channel warning explicitly disabled: doctor says disabled on purpose" grep -q '^OK *alert channel: disabled on purpose' "$TMP/doc.out"
+echo "$(( $(now_s) - 60 ))" > "$D/last-success"
+printf 'time=%s\nholder=check.sh\n' "$(now_s)" > "$D/backup-skipped"
+GB_CONFIG="$dc" "$REPO_DIR/status.sh" --local > "$TMP/skip-status.out" 2>&1
+check "a pending skip alone makes otherwise healthy status need attention" all grep -q '^!! hourly backup skipped at .*held by check.sh' "$TMP/skip-status.out" --and-- grep -qx 'Overall: ATTENTION NEEDED' "$TMP/skip-status.out"
+echo "$(( $(now_s) + 1 ))" > "$D/last-success"
+GB_CONFIG="$dc" "$REPO_DIR/status.sh" --local > "$TMP/skip-status.out" 2>&1
+check "a newer success restores healthy status despite the older skip file" all not grep -q '^!! hourly backup skipped' "$TMP/skip-status.out" --and-- grep -qx 'Overall: OK' "$TMP/skip-status.out"
+rm -f "$D/backup-skipped"; now_s > "$D/last-success"
+dcwarn=$(mkcfg doc-no-channel "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1')
+rc=0; GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" >"$TMP/channel-doc.out" 2>&1 || rc=$?
+check "no channel configured: doctor exit 1 and loud WARN with guidance" all test "$rc" = 1 --and-- grep -q '^WARN *alert channel: NO ALERT CHANNEL:.*nobody is told.*run ./test-alert.sh' "$TMP/channel-doc.out"
+GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" --json >"$TMP/channel-doc.json" 2>&1 || true
+check "doctor JSON includes the alert channel row right after alerts" python3 - "$TMP/channel-doc.json" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1])); a, c = d["checks"][:2]
+assert d["exit"] == 1 and a["name"] == "alerts"
+assert c["name"] == "alert channel" and c["status"] == "WARN" and "NO ALERT CHANNEL" in c["detail"]
+PY
+dcchan=$(mkcfg doc-channel "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1' \
+  'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
+  'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"')
+rc=0; GB_CONFIG="$dcchan" "$REPO_DIR/doctor.sh" >"$TMP/channel-configured.out" 2>&1 || rc=$?
+check "configured but untested channels: doctor exit 0, names and test guidance" all test "$rc" = 0 --and-- grep -q '^OK *alert channel: configured (ntfy+webhook), not tested yet: run ./test-alert.sh' "$TMP/channel-configured.out"
+for mode in local full; do
+  args=(); [[ "$mode" == local ]] && args=(--local)
+  GB_CONFIG="$dcwarn" "$REPO_DIR/status.sh" "${args[@]}" >"$TMP/channel-status.out" 2>&1
+  check "status $mode: missing channel is loud and Overall needs attention" all grep -q '^!! NO ALERT CHANNEL configured: nobody is told about failures' "$TMP/channel-status.out" --and-- grep -qx 'Overall: ATTENTION NEEDED' "$TMP/channel-status.out"
+  GB_CONFIG="$dc" "$REPO_DIR/status.sh" "${args[@]}" >"$TMP/channel-status.out" 2>&1
+  check "status $mode: no-channel warning disabled, Overall OK" all not grep -q 'NO ALERT CHANNEL' "$TMP/channel-status.out" --and-- grep -qx 'Overall: OK' "$TMP/channel-status.out"
+  GB_CONFIG="$dcchan" "$REPO_DIR/status.sh" "${args[@]}" >"$TMP/channel-status.out" 2>&1
+  check "status $mode: channel configured, Overall OK" all not grep -q 'NO ALERT CHANNEL' "$TMP/channel-status.out" --and-- grep -qx 'Overall: OK' "$TMP/channel-status.out"
+done
+run_ok "test-alert tests the configured doctor channels" env GB_CONFIG="$dcchan" "$REPO_DIR/test-alert.sh"
+rc=0; GB_CONFIG="$dcchan" "$REPO_DIR/doctor.sh" --json >"$TMP/channel-tested.json" 2>&1 || rc=$?
+check "successful test: doctor JSON shows tested channel names, never destinations" all test "$rc" = 0 --and-- python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));c=next(c for c in d["checks"] if c["name"]=="alert channel");assert c["status"]=="OK" and c["detail"]=="configured (ntfy+webhook), test passed"' "$TMP/channel-tested.json" --and-- not grep -qE 'alerts\.example\.invalid|secret-abc' "$TMP/channel-configured.out" "$TMP/channel-tested.json" "$TMP/channel-status.out"
+efpos 1 2
+defc=$(mkcfg doc-daily "GB_STATE=$D" "export SERVER_EXPORT_DIR=$EF" 'DELETED_BOTS_FILE=""' 'EXPECTED_BOTS_REQUIRED=0')
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor fresh daily export: exit 0 + OK row" all test "$rc" = 0 --and-- grep -q '^OK       daily export: daily export OK' "$TMP/daily-doc.out"
-efpos 40 50
+efpos 1 40
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor stale daily export: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: daily export missed' "$TMP/daily-doc.out"
+check "doctor mixed ages: names only the stale bot" all grep -q 'oldest: bot-b 40 h)' "$TMP/daily-doc.out" --and-- not grep -q 'oldest: bot-a' "$TMP/daily-doc.out"
+
+step "doctor export warnings and roster onboarding"
+efpos 1 2
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: pos = json.load(f)
+pos["abcdef01"]["warnings"] = ["test warning"]
+pos["abcdef03"] = {"name": "bot-c", "deleted": True, "warnings": ["ignored"]}
+with open(p, "w") as f: json.dump(pos, f)
+PYFIX
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" --json >"$TMP/export-doc.json" 2>&1 || rc=$?
+check "doctor warnings: exit 1, WARN immediately after daily export, active name only" all test "$rc" = 1 --and-- python3 - "$TMP/export-doc.json" <<'PYFIX'
+import json, sys
+rows = json.load(open(sys.argv[1]))["checks"]
+i = next(i for i, row in enumerate(rows) if row["name"] == "daily export")
+assert rows[i]["status"] == "OK"
+assert rows[i+1] == {"name": "export warnings", "status": "WARN", "detail":
+    "export warnings: 1 active bot(s) with warnings (see staging/server-export/INDEX.md): bot-a"}
+PYFIX
+echo '{"abcdef01":{"name":"bot-a","deleted":true,"warnings":["ignored"]}}' > "$EF/state/positions.json"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
+check "doctor ignores deleted warnings: exit 0, OK warnings row" all test "$rc" = 0 --and-- grep -qx 'OK       export warnings: no export warnings' "$TMP/daily-doc.out"
+efpos 1 2
+reqc=$(mkcfg doc-roster "source $defc" 'EXPECTED_BOTS_REQUIRED=1' 'EXPECTED_BOTS=()')
+rc=0; GB_CONFIG="$reqc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + active bots: exit 1 and actionable WARN" all test "$rc" = 1 --and-- grep -qx 'WARN     expected bots: no roster configured: bots could silently drop out of the export unnoticed; run ./expected-bots.sh --suggest and paste the result into config.env (EXPECTED_BOTS)' "$TMP/roster-doc.out"
+rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + required=0: exit 0, OK expected bots and warnings" all test "$rc" = 0 --and-- grep -qx 'OK       expected bots: no roster configured (EXPECTED_BOTS is empty)' "$TMP/roster-doc.out" --and-- grep -qx 'OK       export warnings: no export warnings' "$TMP/roster-doc.out"
+efpos 1 2
+python3 - "$EF/state/positions.json" <<'PYFIX'
+import json, sys
+p = sys.argv[1]
+with open(p) as f: pos = json.load(f)
+for rec in pos.values(): rec.update(total=0, max_pos=-1)
+with open(p, "w") as f: json.dump(pos, f)
+PYFIX
+rostered=$(mkcfg doc-rostered "source $reqc" 'EXPECTED_BOTS=("bot-a" "bot-b")')
+rc=0; GB_CONFIG="$rostered" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor configured roster + active bots: exit 0 and OK" all test "$rc" = 0 --and-- grep -q '^OK *expected bots: all 2 expected bots present and complete' "$TMP/roster-doc.out"
+echo '{"abcdef01":{"deleted":true},"abcdef02":{"unreadable":true}}' > "$EF/state/positions.json"
+rc=0; GB_CONFIG="$reqc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + no active bots: exit 0 and OK" all test "$rc" = 0 --and-- grep -qx 'OK       expected bots: no roster configured (no active exported bots)' "$TMP/roster-doc.out"
 rm -f "$EF/state/positions.json"
 now_s > "$D/first-start"
+rc=0; GB_CONFIG="$reqc" "$REPO_DIR/doctor.sh" >"$TMP/roster-doc.out" 2>&1 || rc=$?
+check "doctor empty roster + no export: exit 0, OK roster and no-export warnings row" all test "$rc" = 0 --and-- grep -qx 'OK       expected bots: no roster configured (no server-side export on this box)' "$TMP/roster-doc.out" --and-- grep -qx 'OK       export warnings: no export yet' "$TMP/roster-doc.out"
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor no export during first-start grace: exit 0 + OK row" all test "$rc" = 0 --and-- grep -q '^OK       daily export: no server-side export yet (first-start grace)' "$TMP/daily-doc.out"
 echo $(( $(now_s) - 27 * 3600 )) > "$D/first-start"
@@ -632,7 +1017,7 @@ rm -f "$D/first-start"
 rc=0; GB_CONFIG="$defc" "$REPO_DIR/doctor.sh" >"$TMP/daily-doc.out" 2>&1 || rc=$?
 check "doctor no export without first-start marker: exit 1 + WARN row" all test "$rc" = 1 --and-- grep -q '^WARN     daily export: no server-side export yet' "$TMP/daily-doc.out"
 echo $(( $(now_s) - 3 * 3600 )) > "$D/first-start"
-check "one line per topic" bash -c 'for t in alerts scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
+check "one line per topic" bash -c 'for t in alerts "alert channel" scheduler "backup lock" credentials "last backup" "last check" "drive auth" "quota/disk" "test restore" "drive report" "expected bots" "daily export" "export warnings"; do grep -q "^OK *$t:" "$1" || exit 1; done' _ "$TMP/doc.out"
 echo '{"agents":{"tid-2":{}}}' > "$TMP/deleted-agents.json"
 dcd=$(mkcfg doc-deleted "GB_STATE=$D" 'EXPECTED_BOTS=("Old Bot")')
 rc=0; GB_CONFIG="$dcd" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
@@ -700,7 +1085,7 @@ GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "CHECK_FAILED latch: PROBLEM last check" grep -q '^PROBLEM *last check: restic check FAILED (latch' "$TMP/doc.out"
 rm -f "$D/CHECK_FAILED"; printf 'result=ok\ntime=%s\npruned=0\n' "$(( $(now_s) - 7200 ))" > "$D/last-check.result"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
-check "last-check.result ok, pruned=0: OK with 'prune skipped'" grep -q '^OK *last check: ok 2 h ago, prune skipped' "$TMP/doc.out"
+check "legacy last-check.result ok, pruned=0: WARN with unknown skip reason and age" grep -q '^WARN *last check: ok 2 h ago, prune skipped (unknown); since ? (unknown)' "$TMP/doc.out"
 printf 'result=failed\ntime=%s\nfiles=3\nmismatches=1\n' "$(now_s)" > "$D/test-restore.result"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "test-restore.result failed: PROBLEM" grep -q '^PROBLEM *test restore: FAILED .*1 mismatches' "$TMP/doc.out"
@@ -736,6 +1121,93 @@ old_doc=$(mkcfg old-doc "source $old" "export AGENTS_DIR=$TMP/agents" "DELETED_B
 GB_CONFIG="$old_doc" "$REPO_DIR/doctor.sh" --json >"$TMP/doc.json" 2>&1 || true
 check "doctor.sh with an older config.env (no new settings) still produces valid JSON" python3 -c 'import json,sys;d=json.load(open(sys.argv[1]));assert d["overall"] in ("OK","WARN","PROBLEM")' "$TMP/doc.json"
 kill "$SP" 2>/dev/null || true; wait "$SP" 2>/dev/null || true
+
+step "scheduler: first restore and never-succeeded retries (stub jobs and clock under /tmp)"
+SC="$TMP/scheduler-fixture"; mkdir -p "$SC/clockbin"
+cp "$REPO_DIR/scheduler.sh" "$REPO_DIR/lib.sh" "$SC/"
+cat > "$SC/clockbin/date" <<'CLOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+now=$(cat "$SC_STATE/clock")
+if [[ "${1:-}" == -d ]]; then
+  if [[ "$2" =~ ^-([0-9]+)\ days$ ]]; then
+    now=$(( now - BASH_REMATCH[1] * 86400 )); shift 2
+  else exec /usr/bin/date "$@"; fi
+fi
+exec /usr/bin/date -d "@$now" "$@"
+CLOCK
+cat > "$SC/clockbin/sleep" <<'CLOCK'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+step=$(cat "$SC_STATE/step" 2>/dev/null || echo 0)
+slot=$(cat "$SC_STATE/sched-test-restore" 2>/dev/null || echo missing)
+retry=$(cat "$SC_STATE/sched-test-restore-retry" 2>/dev/null || echo missing)
+calls=$(wc -l < "$SC_STATE/calls")
+echo "$step slot=$slot retry=$retry calls=$calls" >> "$SC_STATE/boundaries"
+step=$(( step + 1 )); echo "$step" > "$SC_STATE/step"
+next=$(sed -n "${step}p" "$SC_STATE/ticks")
+if [[ -z "$next" ]]; then kill -TERM "$PPID"; exit 0; fi
+echo "$next" > "$SC_STATE/clock"
+CLOCK
+cat > "$SC/backup.sh" <<'JOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+date +%s > "$SC_STATE/last-success"
+JOB
+cat > "$SC/test-restore.sh" <<'JOB'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+echo "${1:-once}" >> "$SC_STATE/calls"
+n=$(wc -l < "$SC_STATE/calls")
+rc=$(sed -n "${n}p" "$SC_STATE/outcomes"); rc=${rc:-0}
+if (( rc == 0 )); then date +%s > "$SC_STATE/last-test-restore"; fi
+exit "$rc"
+JOB
+for job in report expected-bots export-freshness check; do
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nexit 0\n' > "$SC/$job.sh"
+done
+for job in restic rclone curl; do
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\nexit 99\n' > "$SC/clockbin/$job"
+done
+chmod +x "$SC"/*.sh "$SC/clockbin/"*
+sched_case() {   # NAME HOURLY_MIN OUTCOMES INITIAL_STATE TICK...
+  local name="$1" hourly="$2" outcomes="$3" initial="$4" cfg tick rc=0; shift 4
+  export SC_STATE="$SC/$name"; mkdir -p "$SC_STATE"
+  : > "$SC_STATE/calls"; tr ' ' '\n' <<< "$outcomes" > "$SC_STATE/outcomes"
+  /usr/bin/date -u -d '2000-01-09 01:00' +%s > "$SC_STATE/clock"
+  for tick in "$@"; do /usr/bin/date -u -d "$tick" +%s; done > "$SC_STATE/ticks"
+  if [[ "$initial" != fresh ]]; then
+    cp "$SC_STATE/clock" "$SC_STATE/last-success"; touch "$SC_STATE/test-restore-attempted"
+  fi
+  if [[ "$initial" == succeeded ]]; then
+    cp "$SC_STATE/clock" "$SC_STATE/last-test-restore"
+    echo 2000-01-02 > "$SC_STATE/sched-test-restore"
+  fi
+  cfg=$(mkcfg "sched-$name" "GB_DIR=$SC" "GB_BIN=$SC/clockbin" "GB_STATE=$SC_STATE" "HOURLY_AT_MIN=$hourly" QUICK_EVERY_MIN=0 WATCHDOG_AT_MIN=60 'DAILY_CHECK_AT="23:59"' TEST_RESTORE_WEEKDAY=0 'TEST_RESTORE_AT="02:20"')
+  PATH="$SC/clockbin:$PATH" GB_CONFIG="$cfg" timeout -k 1 5 "$SC/scheduler.sh" > "$SC_STATE/output" 2>&1 || rc=$?
+  check "$name: scheduler completed the controlled ticks" test "$rc" = 143
+  if [[ "$initial" == succeeded ]]; then
+    check "$name: first start preserves the existing weekly slot" grep -qx '0 slot=2000-01-02 retry=missing calls=0' "$SC_STATE/boundaries"
+  else
+    check "$name: first start leaves the weekly slot unmarked" grep -qx '0 slot=missing retry=missing calls=0' "$SC_STATE/boundaries"
+  fi
+}
+sched_case fresh 60 0 fresh '2000-01-09 03:00'
+check "fresh scheduler with no hourly success does not run a restore" test ! -s "$SC_STATE/calls"
+sched_case once 0 '0 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-16 02:20'
+check "once success marks this slot and avoids a second restore on the next tick" grep -qx '2 slot=2000-01-09 retry=missing calls=1' "$SC_STATE/boundaries"
+check "weekly restore runs at the next due weekday/time after once" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-16 --and-- test -s "$SC_STATE/test-restore-attempted"
+sched_case failed-once 0 '6 6 0' fresh '2000-01-09 03:00' '2000-01-09 03:01' '2000-01-10 03:00' '2000-01-10 03:01'
+check "failed once leaves weekly due; failed weekly unmarks slot and remembers today" grep -qx '1 slot=missing retry=2000-01-09 calls=2' "$SC_STATE/boundaries"
+check "never succeeded: no second weekly attempt that day" grep -qx '2 slot=missing retry=2000-01-09 calls=2' "$SC_STATE/boundaries"
+check "never succeeded: next day retries the same due slot and records success" all test "$(cat "$SC_STATE/calls")" = $'once\n--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test -s "$SC_STATE/last-test-restore"
+sched_case busy 60 '75 0' attempted '2000-01-09 03:00' '2000-01-09 03:01'
+check "lock busy leaves slot unmarked without delaying until tomorrow" grep -qx '1 slot=missing retry=missing calls=1' "$SC_STATE/boundaries"
+check "lock busy retries next minute and marks the successful slot" all test "$(cat "$SC_STATE/calls")" = $'--weekly\n--weekly' --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09
+sched_case catchup 60 0 attempted '2000-01-09 02:19'
+check "fresh scheduler catches up the previous due slot before this week's time" all test "$(cat "$SC_STATE/calls")" = --weekly --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-02
+sched_case prior-success 60 6 succeeded '2000-01-09 03:00' '2000-01-10 03:00'
+check "a prior success keeps failed weekly slot marked without daily retries" all test "$(cat "$SC_STATE/calls")" = --weekly --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test ! -e "$SC_STATE/sched-test-restore-retry"
 
 step "scheduler: weekly test restore slot is due-based and followed by report.sh (waits for the next minute tick)"
 SCHED_CFG=$(mkcfg sched 'HOURLY_AT_MIN=60' 'QUICK_EVERY_MIN=0' 'WATCHDOG_AT_MIN=60' 'DAILY_CHECK_AT="23:59"' "TEST_RESTORE_WEEKDAY=$(TZ=UTC date +%w)" 'TEST_RESTORE_AT="00:00"')

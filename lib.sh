@@ -14,10 +14,18 @@ source "$GB_CONFIG"
 : "${LOCK_ALERT_HOURS:=13}" "${HEARTBEAT_MAX_MIN:=90}" "${PRUNE_USE_TRASH:=1}"
 : "${QUOTA_ALERT_PCT:=90}" "${LOG_RETENTION_DAYS:=0}" "${RESTORE_LOCK_WAIT:=600}"
 : "${ALERT_HOOK:=}" "${ALERT_HOOK_TIMEOUT:=60}" "${ALERT_DEDUPE_HOURS:=24}" "${DRIVE_REPORT:=1}"
+: "${ALERT_NTFY_URL:=}" "${ALERT_WEBHOOK_URL:=}" "${ALERT_CHANNEL_REQUIRED:=1}"
 : "${EXPORT_MISSED_HOURS:=26}"
+: "${EXPECTED_BOTS_REQUIRED:=1}"
 : "${PROMOTE_LOCK_WAIT:=2m}" "${SNAPSHOT_LIST_RETRY_S:=5}"
+: "${LOCK_RETRY_WAIT:=2m}"
+: "${PRUNE_SKIP_PROBLEM_DAYS:=3}" "${HOURLY_MISS_WARN:=1}" "${HOURLY_SLOT_WINDOW_H:=24}"
+GB_UNLOCK_DONE=0
 : "${TEST_RESTORE_AT:=02:20}" "${EXPECTED_BOTS_MAX_HOURS:=26}" "${EXPECTED_BOTS_GRACE_MIN:=60}"
 [[ -v TEST_RESTORE_WEEKDAY ]] || TEST_RESTORE_WEEKDAY=0   # unset = Sunday; an explicit "" turns the weekly run off
+if [[ "$TEST_RESTORE_WEEKDAY" =~ ^[0-6]$ ]]; then : "${TEST_RESTORE_MAX_DAYS:=10}"
+else : "${TEST_RESTORE_MAX_DAYS:=35}"; fi
+: "${TEST_RESTORE_FIRST_DAYS:=3}"
 [[ -v EXPECTED_BOTS ]] || EXPECTED_BOTS=()
 : "${AGENTS_DIR=/home/box/agent-data/agents}"
 export AGENTS_DIR
@@ -34,7 +42,7 @@ log()  { echo "[$(date '+%F %T %Z')] $*" | tee -a "$LOG" >&2; }
 # alert: loud, persistent failure marker. state/ALERT stays until `status.sh --ack`.
 # Dedupe: the same text goes into ALERT/alerts.log and to the hook once per incident; repeats are only noted
 # in the month log (state/alert-seen holds "key first-seen count"). The incident key ignores the timestamp and
-# every number in the text, so a message whose age, count or pid grows ("held for 13h" -> "14h") stays one
+# standalone numbers, so a message whose age, count or pid grows ("held for 13h" -> "14h") stays one
 # incident; the first text is the one recorded, every repeat is logged in full. A new incident starts after
 # `status.sh --ack` (removes alert-seen) or ALERT_DEDUPE_HOURS after the first occurrence. The decision and
 # the state writes happen under state/alert.lock (concurrent callers, --ack); the hook runs after it is released.
@@ -42,11 +50,19 @@ alert(){
   local text msg key decision
   text="[$(basename "$0")] $*"
   msg="[$(date '+%F %T %Z')] $text"
-  key=$(printf '%s' "$text" | sed 's/[0-9][0-9]*/#/g' | sha256sum | cut -c1-16)
+  key=$(printf '%s' "$text" | _alert_normalize | sha256sum | cut -c1-16)
   decision=$(_alert_record "$key" "$msg")
   if [[ "$decision" == repeat* ]]; then log "ALERT ($decision, not re-recorded): $*"; return 0; fi
   log "ALERT: $*"
   alert_hook "$msg"
+}
+# Keep digits in identifiers (bot-10, Name2, v2); mask dates and standalone measurements.
+# Repeat the token substitution because adjacent numbers can share a delimiter.
+_alert_normalize(){
+  local stamp='(^|[^[:alnum:]_.-])[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2}:[0-9]{2}([.,][0-9]+)?(Z|[+-][0-9]{2}:?[0-9]{2})?)?($|[^[:alnum:]_.-]|[.]([[:space:]]|$))'
+  local token='(^|[^[:alnum:]_.-])[0-9]+([.][0-9]+)?(h|m|min|s|d|ms|%|days|hours|minutes|seconds|files|bytes|[kKmMgGtT]i?[bB])?($|[^[:alnum:]_.-]|[.]([[:space:]]|$))'
+  sed -E -e "s/$stamp/\1#\5/g" -e "s/$stamp/\1#\5/g" \
+    -e "s/$token/\1#\3\4/g" -e "s/$token/\1#\3\4/g"
 }
 _alert_record(){  # _alert_record KEY MSG -> "new" or "repeat N, same incident since ..."; locked read-modify-write
   local key="$1" msg="$2" seen="$GB_STATE/alert-seen" line first=0 count=1 now
@@ -77,15 +93,75 @@ alert_ack(){
     else echo "no alerts"; fi
   )
 }
-# Optional alert channel (ALERT_HOOK, off by default): the command gets the alert text on stdin and in
-# $GB_ALERT_MSG, runs under a timeout, and its failures are logged but never fatal. GB_IN_ALERT_HOOK stops
-# a hook that itself raises an alert from running the hook again.
+# Channel names only: safe for status files and diagnostics.
+alert_channels(){
+  local names=""
+  [[ -n "$ALERT_NTFY_URL" ]] && names=ntfy
+  [[ -n "$ALERT_WEBHOOK_URL" ]] && names+="${names:++}webhook"
+  [[ -n "$ALERT_HOOK" ]] && names+="${names:++}hook"
+  printf '%s' "$names"
+}
+# URLs travel only over stdin, quoted for curl's config parser (including embedded newlines).
+_alert_curl_config(){
+  local url="$1"
+  url=${url//\\/\\\\}; url=${url//\"/\\\"}
+  url=${url//$'\n'/\\n}; url=${url//$'\r'/\\r}; url=${url//$'\t'/\\t}; url=${url//$'\v'/\\v}
+  printf 'url = "%s"\n' "$url"
+}
+# One synchronous send; returns this channel's rc. Curl output can contain a secret URL, so discard it.
+alert_send(){
+  local channel="$1" msg="$2" rc=0 body url content_type
+  if [[ "$channel" == hook ]]; then
+    GB_IN_ALERT_HOOK=1 GB_ALERT_MSG="$msg" timeout -k 10 "${ALERT_HOOK_TIMEOUT:-60}" bash -c "$ALERT_HOOK" <<<"$msg" >>"$GB_LOGS/alert-hook.log" 2>&1 || rc=$?
+    return "$rc"
+  fi
+  body=$(mktemp /tmp/grokbox-alert.XXXXXX) || return 1
+  if [[ "$channel" == ntfy ]]; then
+    url=$ALERT_NTFY_URL; content_type=text/plain
+    printf '%s' "$msg" > "$body" || rc=$?
+  else
+    url=$ALERT_WEBHOOK_URL; content_type=application/json
+    printf '%s' "$msg" | python3 -c 'import json,sys; json.dump({"text": sys.stdin.read()}, sys.stdout)' > "$body" 2>/dev/null || rc=$?
+  fi
+  if (( rc == 0 )); then
+    _alert_curl_config "$url" | GB_IN_ALERT_HOOK=1 curl --disable --fail --silent --show-error --max-time "$ALERT_HOOK_TIMEOUT" \
+      -K - --request POST --header "Content-Type: $content_type" --data-binary "@$body" >/dev/null 2>&1 || rc=$?
+  fi
+  rm -f "$body"
+  return "$rc"
+}
+# Shared by real alerts and test-alert.sh. A hook raising an alert must not send recursively.
+alert_deliver(){
+  [[ -z "${GB_IN_ALERT_HOOK:-}" ]] || return 0
+  local msg="$1" mode="${2:-real}" names channel rc result=ok failed=0 attempted=""
+  local channels=()
+  names=$(alert_channels)
+  [[ -n "$names" ]] || return 3
+  IFS=+ read -r -a channels <<<"$names"
+  for channel in "${channels[@]}"; do
+    rc=0; alert_send "$channel" "$msg" || rc=$?
+    if (( rc != 0 )); then
+      result=failed; failed=1
+      printf '%s: FAILED (rc=%s)\n' "$channel" "$rc" >>"$GB_LOGS/alert-hook.log"
+      if [[ "$channel" == hook ]]; then
+        log "WARN alert hook exited rc=$rc (124 = killed after ALERT_HOOK_TIMEOUT=${ALERT_HOOK_TIMEOUT}s); see $GB_LOGS/alert-hook.log"
+      else log "WARN alert $channel exited rc=$rc (timeout=${ALERT_HOOK_TIMEOUT}s); see $GB_LOGS/alert-hook.log"; fi
+    fi
+    if [[ "$mode" == test ]]; then
+      if (( rc == 0 )); then echo "$channel: ok"; else echo "$channel: FAILED (rc=$rc)"; fi
+    else
+      attempted+="${attempted:++}$channel"
+      kv_write "$GB_STATE/alert-delivery.status" "result=$result" "time=$(date +%s)" "channels=$attempted"
+    fi
+  done
+  if [[ "$mode" == test ]]; then
+    kv_write "$GB_STATE/alert-test.status" "result=$result" "time=$(date +%s)"
+  fi
+  return "$failed"
+}
+# Real delivery failures never fail the job that raised the alert.
 alert_hook(){
-  [[ -n "${ALERT_HOOK:-}" && -z "${GB_IN_ALERT_HOOK:-}" ]] || return 0
-  local rc=0
-  GB_IN_ALERT_HOOK=1 GB_ALERT_MSG="$1" timeout -k 10 "${ALERT_HOOK_TIMEOUT:-60}" bash -c "$ALERT_HOOK" <<<"$1" >>"$GB_LOGS/alert-hook.log" 2>&1 || rc=$?
-  (( rc == 0 )) || log "WARN alert hook exited rc=$rc (124 = killed after ALERT_HOOK_TIMEOUT=${ALERT_HOOK_TIMEOUT}s); see $GB_LOGS/alert-hook.log"
-  return 0
+  alert_deliver "$1" || true
 }
 # Small key=value state files shared between the scripts (last-backup.result, test-restore.result, ...).
 kv_get() {  # kv_get FILE KEY -> value (empty when the file or the key is missing; never fails; NULs dropped)
@@ -99,6 +175,20 @@ epoch_ok() { local v; v=$(num_ok "${1:-}"); [[ -n "$v" ]] && (( v > 0 && v < 858
 kv_num() { num_ok "$(kv_get "$1" "$2")"; }                                    # kv_num FILE KEY
 kv_epoch() { epoch_ok "$(kv_get "$1" "$2")"; }                                # kv_epoch FILE KEY
 epoch_file() { epoch_ok "$(head -c 32 "$1" 2>/dev/null | tr -d '[:space:]\000')"; }   # epoch_file FILE (one timestamp)
+# Diagnostics share the same validated lock-skip record and quick-chain age limit.
+skipped_backup() {
+  local success
+  SKIP_TIME=$(kv_epoch "$GB_STATE/backup-skipped" time)
+  SKIP_HOLDER=$(kv_get "$GB_STATE/backup-skipped" holder)
+  [[ "$SKIP_HOLDER" =~ ^[a-zA-Z0-9._-]{1,64}$ ]] || SKIP_HOLDER=unknown
+  success=$(epoch_file "$GB_STATE/last-success")
+  [[ -n "$SKIP_TIME" ]] && (( SKIP_TIME > ${success:-0} ))
+}
+quick_max_age_s() {
+  local minutes
+  minutes=$(num_ok "$QUICK_EVERY_MIN"); minutes=${minutes:-15}
+  if (( minutes > 40 )); then echo "$(( minutes * 180 ))"; else echo 7200; fi
+}
 # Weekly test restore: date of the most recent TEST_RESTORE_WEEKDAY (0=Sunday..6) whose TEST_RESTORE_AT
 # has passed; prints nothing when TEST_RESTORE_WEEKDAY is empty (weekly run off). scheduler.sh runs
 # test-restore.sh --weekly once per slot (due-based, so a slot missed while the box was off is caught up).
@@ -148,6 +238,29 @@ RT() { _restic_call_log RT "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" 
 RCL() { timeout -k 30 "${RCLONE_TIMEOUT:-300}" "$GB_BIN/rclone" --config "$RCLONE_CONFIG" "$@"; }
 
 restic_lock_error() { grep -qi 'repository is already locked' "$1"; }
+# Call only while holding backup.lock; share the budget with promotion and check's startup unlock.
+restic_unlock_once() {
+  local what="$1" rc=0
+  [[ $GB_UNLOCK_DONE == 0 ]] || return 0
+  GB_UNLOCK_DONE=1
+  R unlock >>"$LOG" 2>&1 || rc=$?
+  log "$what: plain restic unlock ran rc=$rc"
+  alert "$what: repository was locked; plain restic unlock (stale locks only) was run before retrying"
+}
+restic_retry_unlock() {  # WRAPPER SUBCOMMAND [args...]; keep stdout unchanged
+  local wrapper="$1" cmd="$2" err rc=0; shift 2
+  err=$(mktemp "$GB_STATE/restic-error.XXXXXX")
+  "$wrapper" "$cmd" --retry-lock "$LOCK_RETRY_WAIT" "$@" 2>"$err" || rc=$?
+  cat "$err" >>"$LOG"
+  if (( rc != 0 )) && restic_lock_error "$err"; then
+    restic_unlock_once "$cmd"
+    rc=0
+    "$wrapper" "$cmd" --retry-lock "$LOCK_RETRY_WAIT" "$@" 2>"$err" || rc=$?
+    cat "$err" >>"$LOG"
+  fi
+  rm -f "$err"
+  return "$rc"
+}
 # Retry a transient read once; keep only the final attempt's output and error for the caller.
 snapshot_list() {  # snapshot_list OUTPUT ERROR [snapshots flags...]
   local out="$1" err="$2" attempt rc; shift 2
@@ -309,7 +422,7 @@ prepare_retention() {
   local ids id
   ids=$(R snapshots --no-lock --host "$BACKUP_HOST" --tag incomplete --json | python3 -c 'import json,sys;print("\n".join(s["id"] for s in json.load(sys.stdin) if set(s.get("tags") or []) & {"auto","quick"}))') || return 1
   while IFS= read -r id; do
-    [[ -z "$id" ]] || R tag --remove auto,quick "$id" >>"$LOG" 2>&1 || return 1
+    [[ -z "$id" ]] || restic_retry_unlock R tag --remove auto,quick "$id" >>"$LOG" 2>&1 || return 1
   done <<< "$ids"
 }
 

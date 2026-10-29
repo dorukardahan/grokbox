@@ -72,6 +72,13 @@ The shared steps:
 5. `server-export-merge.py age --max-hours 26 <partner-covered ids>`: exit 1 = the partner's export is missing.
 6. Check `INDEX.md`: no `gap` rows and no warnings. The next hourly snapshot picks everything up.
 
+`./export-freshness.sh` requires every active bot's `checked` time within `EXPORT_MISSED_HOURS`
+(default 26; 0 disables); unknown times are stale. Deleted, retired and unreadable bots are ignored.
+`./export-freshness.sh --warnings` lists active bots with INDEX warnings; doctor's "export warnings"
+row shows WARN for these without raising alerts. Review the details in `staging/server-export/INDEX.md`.
+Run `./expected-bots.sh --suggest`, review the array, and paste it into local `config.env`.
+Doctor warns about an empty roster once active exports exist; `EXPECTED_BOTS_REQUIRED=0` silences it.
+
 A bot that is renamed keeps one file: the transcript file is renamed to the new slug. `repair` merges files
 that older versions split; it keeps the originals in `state/replaced/`.
 

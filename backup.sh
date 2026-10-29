@@ -21,6 +21,12 @@ else
   exec 9>"$GB_STATE/backup.lock"
   if ! flock -w "$WAIT" 9; then
     problem=$(lock_problem); [[ -z "$problem" ]] || alert "$problem"
+    if [[ $MODE == auto ]]; then
+      holder=unknown
+      if lock_record; then holder="${LOCK_JOB:-unknown}"; fi
+      printf 'time=%s\nmode=auto\nreason=lock-busy\nholder=%s\nwaited=%s\n' "$(date +%s)" "$holder" "$WAIT" > "$GB_STATE/backup-skipped"
+      alert "hourly backup skipped: backup lock still busy after waiting ${WAIT}s (held by $holder); no hourly snapshot was taken this slot"
+    fi
     log "$MODE: another backup/check is running; skip"; exit 0; fi
   rm -f "$GB_STATE"/snapshot-list.* "$GB_STATE"/promote-list.* "$GB_STATE"/promote-error.* "$GB_STATE"/promote-tag.*
   took_lock "$MODE"
@@ -133,9 +139,17 @@ TAGS=(--tag incomplete --tag "profile=$BACKUP_PROFILE" --tag "files=$F" --tag "b
 log "backup start mode=$MODE profile=$BACKUP_PROFILE files=$F bytes=$B parent=${PARENT[1]:-none}"
 rc=0   # `|| rc=$?` keeps both errexit and the ERR trap quiet for restic's rc=3 (partial but valid snapshot)
 events="$GB_LOGS/backup-$MODE.json.tmp"
-BACKUP_STARTED=$(date +%s)
-RESTIC_PROGRESS_FPS=0.01 R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --json --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
-  "${PATHS[@]}" >"$events" 2>&1 || rc=$?
+for attempt in 1 2; do
+  rc=0
+  BACKUP_STARTED=$(date +%s)
+  RESTIC_PROGRESS_FPS=0.01 R_TIMEOUT="$RESTIC_TIMEOUT_BACKUP" R backup --retry-lock "$LOCK_RETRY_WAIT" --json --host "$BACKUP_HOST" --one-file-system --compression auto "${PARENT[@]}" "${EXARGS[@]}" "${TAGS[@]}" \
+    "${PATHS[@]}" >"$events" 2>&1 || rc=$?
+  if [[ $attempt == 1 && $rc != 0 && $GB_UNLOCK_DONE == 0 ]] && restic_lock_error "$events"; then
+    cat "$events" >>"$LOG"
+    restic_unlock_once "backup ($MODE)"
+  else break; fi
+done
+backup_locked=0; restic_lock_error "$events" && backup_locked=1
 python3 - "$events" >> "$LOG" <<'PYLOG'
 import json, sys
 for line in open(sys.argv[1]):
@@ -170,7 +184,10 @@ PYTIME
   alert "restic backup ($MODE) $outcome (timeout limit $RESTIC_TIMEOUT_BACKUP): $ending (rc=$rc); interrupted uploads resume next run; prune waits for a complete hourly backup"
   exit "$rc"
 fi
-if [[ $rc != 0 && $rc != 3 ]]; then alert "restic backup ($MODE) failed rc=$rc (see $LOG)"; exit "$rc"; fi
+if [[ $rc != 0 && $rc != 3 ]]; then
+  failure=""; [[ $backup_locked == 0 ]] || failure="; repository is locked"
+  alert "restic backup ($MODE) failed rc=$rc$failure (see $LOG)"; exit "$rc"
+fi
 if [[ $rc == 3 && "${summary[0]:-}" != warnings ]]; then
   RESULT=incomplete; date +%s > "$GB_STATE/last-partial"
   alert "restic backup ($MODE) created an INCOMPLETE snapshot; excluded from complete-snapshot retention (kept for 7 days); last-success unchanged. Unreadable paths (up to 20): ${summary[6]:-unknown; see log}"
@@ -232,7 +249,8 @@ if [[ -n "$SNAPSHOT" ]]; then
       break
     fi
     log "backup ($MODE): snapshot promotion attempt $attempt failed: $promotion_failure"
-    if [[ $attempt == 1 ]]; then
+    if [[ $attempt == 1 && $GB_UNLOCK_DONE == 0 ]]; then
+      GB_UNLOCK_DONE=1
       unlock_rc=0
       R unlock >>"$LOG" 2>&1 || unlock_rc=$?
       log "backup ($MODE): plain restic unlock ran rc=$unlock_rc"
@@ -252,7 +270,10 @@ fi
 date +%s > "$GB_STATE/last-success-$MODE"
 if [[ $MODE == auto ]]; then
   cp "$cur" "$GB_STATE/manifest-last-good.json"; date +%s > "$GB_STATE/last-success"
-  rm -f "$GUARD_LATCH" "$GB_STATE/last-partial"   # only a good hourly backup clears the latch
+  # backup.lock serializes writers; readers see only the complete, bounded history.
+  { [[ ! -f "$GB_STATE/hourly-history" ]] || cat "$GB_STATE/hourly-history"; cat "$GB_STATE/last-success"; } | tail -n 400 > "$GB_STATE/hourly-history.tmp"
+  mv "$GB_STATE/hourly-history.tmp" "$GB_STATE/hourly-history"
+  rm -f "$GUARD_LATCH" "$GB_STATE/last-partial" "$GB_STATE/backup-skipped"   # only a good hourly backup clears the latch
   [[ -z "$NO_FORGET_WHY" ]] && rm -f "$SQLITE_LATCH"   # ...and the SQLite latch needs a fully clean hourly
 fi
 log "backup ok mode=$MODE rc=$rc"
@@ -262,9 +283,9 @@ elif [[ -e "$SQLITE_LATCH" ]]; then alert "forget skipped: SQLite staging failed
 elif [[ -e "$GB_STATE/CHECK_FAILED" ]]; then log "forget skipped: integrity check failure latch is set"
 elif [[ $FORGET == 1 && $MODE == auto ]]; then   # forget only; the actual prune happens daily in check.sh
   if prepare_retention; then
-    RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
-    RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
-    RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
+    restic_retry_unlock RT forget --host "$BACKUP_HOST" --tag auto "${KEEP[@]}" >>"$LOG" 2>&1 || alert "forget (auto) failed"
+    restic_retry_unlock RT forget --host "$BACKUP_HOST" --tag quick "${KEEP_QUICK[@]}" >>"$LOG" 2>&1 || alert "forget (quick) failed"
+    restic_retry_unlock RT forget --host "$BACKUP_HOST" --tag incomplete --keep-within 7d >>"$LOG" 2>&1 || alert "forget (incomplete) failed"
   else alert "forget skipped: incomplete snapshot tags could not be repaired"; fi
 fi
 exit 0
