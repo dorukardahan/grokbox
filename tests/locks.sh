@@ -37,7 +37,7 @@ echo fixture > "$TMP/src/unreadable"
 mkdir -p "$TMP/state/rebuild-kit"; touch "$TMP/state/rebuild-kit/inventory.txt"
 cat > "$TMP/bin/restic" <<'PY'
 #!/usr/bin/env python3
-import json,os,sys,time
+import json,os,sys,time,signal
 from pathlib import Path
 root=Path(os.environ['TEST_ROOT']); args=sys.argv[1:]; cmd=args[0]
 with (root/'calls').open('a') as f: f.write(cmd+'\n')
@@ -47,6 +47,13 @@ def count(name):
     n=int(counter.read_text())+1 if counter.exists() else 1
     counter.write_text(str(n))
     return n
+def hang():
+    with (root/'hang-groups').open('a') as f: f.write(str(os.getpgrp())+'\n')
+    if os.environ.get('HANG_IGNORE_TERM')=='1': signal.signal(signal.SIGTERM,signal.SIG_IGN)
+    while True: time.sleep(1)
+if cmd==os.environ.get('HANG_COMMAND'):
+    n=count('hang-count')
+    if int(os.environ.get('HANG_SKIP','0'))<n<=int(os.environ.get('HANG_COUNT','99')): hang()
 snapshot=root/'snapshot.json'
 old_snapshot=root/'snapshot-old.json'
 if os.environ.get('RESTIC_SLEEP')=='1':
@@ -325,6 +332,52 @@ assert 'incomplete' not in s['tags'] and 'auto' in s['tags']
 assert 'snapshot='+s['short_id'] in result and 'result=complete' in result
 PYVERIFY
 }
+# Real timeout process groups, with an outer watchdog so regressions cannot hang the suite.
+# TERM-resistant calls require the production 60-second KILL grace.
+cp "$TMP/test.env" "$TMP/hang.env"
+printf '\nRESTIC_TIMEOUT_META=2s\nRESTIC_TIMEOUT_FORGET=2s\n' >> "$TMP/hang.env"
+run_hung_backup() {
+  local expected="$1" bound="$2" started=$SECONDS rc=0
+  timeout -k 5 "$bound" env GB_CONFIG="$TMP/hang.env" "$REPO_DIR/backup.sh" > "$TMP/hang.out" 2>&1 || rc=$?
+  if (( rc == 124 || rc == 137 )); then
+    # A regressed inner timeout may leave its separate process group behind.
+    while read -r group; do kill -KILL -- "-$group" 2>/dev/null || true; done < "$TMP/hang-groups"
+  fi
+  check "hung $HANG_COMMAND elapsed within ${bound}s" test "$((SECONDS-started))" -lt "$bound"
+  [[ $rc == "$expected" ]]
+}
+for scenario in tag snapshots snapshots-tail recover unlock forget; do
+  reset_promotion
+  rm -f "$TMP/hang-count" "$TMP/hang-groups"
+  export HANG_COMMAND="$scenario" HANG_COUNT=99
+  case "$scenario" in
+    tag)
+      check 'persistent silent tag exits incomplete' run_hung_backup 6 20
+      check 'final promotion alert names tag timeout' grep -q 'retention skipped; restic tag timed out' "$TMP/state/ALERT";;
+    snapshots)
+      export HANG_IGNORE_TERM=1
+      check 'TERM-resistant listing exits cleanly' run_hung_backup 7 100
+      unset HANG_IGNORE_TERM;;
+    snapshots-tail)
+      export HANG_COMMAND=snapshots HANG_SKIP=1
+      check 'silent promotion listings exit incomplete' run_hung_backup 6 20
+      unset HANG_SKIP;;
+    recover)
+      export HANG_COMMAND=tag HANG_COUNT=1
+      check 'silent first tag recovers on second attempt' run_hung_backup 0 20
+      check 'recovered tag is verified promoted' verified_snapshot
+      check 'timeout recovery uses one plain unlock' test "$(grep -cx unlock "$TMP/args")" = 1;;
+    unlock)
+      export TAG_FAILURES=1
+      check 'silent unlock remains bounded' run_hung_backup 0 20
+      unset TAG_FAILURES;;
+    forget)
+      check 'silent forget remains bounded with alerts' run_hung_backup 0 20;;
+  esac
+  check "$scenario raises clear timeout alert" grep -q "restic $HANG_COMMAND timed out" "$TMP/state/ALERT"
+done
+unset HANG_COMMAND HANG_COUNT
+
 reset_promotion
 export TAG_LOCKED=1
 check 'locked promotion recovers and completes' run_backup 0

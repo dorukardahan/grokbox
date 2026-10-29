@@ -36,6 +36,10 @@ is the only supported version.
   scheduled prompt. The handoff line is unchanged. `tests/ci-install.sh` checks the numbering.
 
 ### Fixed
+- A Drive call that goes silent (for example after a VM pause) can no longer hang a backup step for hours: rclone gets
+  transport timeouts (`RCLONE_NET_ARGS`), `restic tag/unlock/snapshots/cat` are limited to `RESTIC_TIMEOUT_META` (10m) and
+  `forget` to `RESTIC_TIMEOUT_FORGET` (30m), a timeout raises an alert, and a timed-out snapshot promotion is retried once
+  after the usual single plain unlock.
 - Incremental transcript overlap matching ignores volatile user `<memory_context>` lines on both
   sides after exact matching fails, requiring an ordinary matching line and preserving new context.
 - Docs no longer say the shared memory is "backed up" without a caveat: the memory export is a

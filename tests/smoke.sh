@@ -65,6 +65,51 @@ nsnap() { rs snapshots --json 2>/dev/null | python3 -c 'import json,sys;print(le
 ntag() { rs snapshots --json 2>/dev/null | python3 -c 'import json,sys;print(sum(1 for s in json.load(sys.stdin) if sys.argv[1] in (s.get("tags") or [])))' "$1"; }
 tree_sum() { (cd "$1" && find . -type f ! -name '*.db' ! -name restic-pass -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1); }
 
+step "restic timeout selection and rclone transport defaults (fake binaries)"
+mkdir -p "$TMP/unit-bin"
+printf '#!/usr/bin/env bash\nprintf "direct:%%s\\n" "$1"\n' > "$TMP/unit-bin/restic"
+chmod +x "$TMP/unit-bin/restic"
+check "R and RT select subcommand budgets; explicit overrides including zero win" bash -c '
+  source "$1/lib.sh"
+  GB_BIN="$2/unit-bin"
+  timeout() { printf "%s\n" "$3"; }
+  for wrapper in R RT; do
+    for cmd in tag unlock snapshots cat forget backup check prune ls stats; do
+      case "$cmd" in tag|unlock|snapshots|cat) expected=10m;; forget) expected=30m;; *) expected=3h;; esac
+      [[ $("$wrapper" "$cmd") == "$expected" ]] || exit 1
+      [[ $(R_TIMEOUT=7s "$wrapper" "$cmd") == 7s ]] || exit 1
+      [[ $(R_TIMEOUT=0 "$wrapper" "$cmd") == "direct:$cmd" ]] || exit 1
+    done
+  done
+' _ "$REPO_DIR" "$TMP"
+mkdir -p "$TMP/hang-bin"
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$TMP/hang-bin/restic"; chmod +x "$TMP/hang-bin/restic"
+check "default-bounded timeout alerts; a caller-set R_TIMEOUT does not" bash -c '
+  source "$1/lib.sh"
+  GB_BIN="$2/hang-bin"; RESTIC_TIMEOUT_META=1
+  rc=0; R snapshots >/dev/null 2>&1 || rc=$?; [[ $rc == 124 ]] || exit 1
+  grep -q "restic snapshots timed out" "$GB_STATE/ALERT" || exit 1
+  rm -f "$GB_STATE/ALERT"
+  rc=0; R_TIMEOUT=1 R snapshots >/dev/null 2>&1 || rc=$?; [[ $rc == 124 ]] || exit 1
+  [[ ! -s "$GB_STATE/ALERT" ]]
+' _ "$REPO_DIR" "$TMP"
+for net in default empty; do
+  { cat "$TMP/config.env"; echo 'export RESTIC_REPOSITORY="rclone:fixture:repo"';
+    echo 'RCLONE_SERVE_ARGS="--timeout 9m"'
+    if [[ $net == empty ]]; then echo 'RCLONE_NET_ARGS=""'; else echo 'unset RCLONE_NET_ARGS'; fi
+  } > "$TMP/net.env"
+  check "transport args in both arrays: $net" env GB_CONFIG="$TMP/net.env" bash -c '
+    source "$1/lib.sh"
+    for args in "${RESTIC_OPTS[*]}" "${RESTIC_OPTS_TRASH[*]}"; do
+      if [[ $2 == default ]]; then
+        [[ $args == *"--contimeout 30s --timeout 2m --low-level-retries 5 --timeout 9m"* ]] || exit 1
+      else
+        [[ $args == *"--timeout 9m"* && $args != *--contimeout* && $args != *--low-level-retries* ]] || exit 1
+      fi
+    done
+  ' _ "$REPO_DIR" "$net"
+done
+
 step "install (binaries, password file from env)"
 run_ok "install.sh" "$REPO_DIR/install.sh"
 cp "$TMP/last.out" "$TMP/install.out"
@@ -224,7 +269,7 @@ check "PRUNE_USE_TRASH=0: normal calls unchanged (still false)" bash -c '[[ "${1
 tan=$(GB_CONFIG="$TMP/config-rcn.env" bash -c 'source "$1/lib.sh"; printf "%s" "${RESTIC_OPTS_TRASH[*]}"' _ "$REPO_DIR")
 check "default PRUNE_USE_TRASH=1 adds --drive-use-trash=true even without the flag in RCLONE_SERVE_ARGS" bash -c '[[ "$1" == *use-trash=true* && "$1" != *use-trash=false* ]]' _ "$tan"
 check "check.sh prunes via RT (Drive trash)" grep -q 'RT prune' "$REPO_DIR/check.sh"
-{ cat "$TMP/config.env"; echo 'unset RESTIC_TIMEOUT RESTIC_TIMEOUT_BACKUP RESTIC_TIMEOUT_CHECK LOCK_ALERT_HOURS HEARTBEAT_MAX_MIN PRUNE_USE_TRASH RCLONE_TIMEOUT'; } > "$TMP/config-old.env"
+{ cat "$TMP/config.env"; echo 'unset RCLONE_NET_ARGS RESTIC_TIMEOUT_META RESTIC_TIMEOUT_FORGET RESTIC_TIMEOUT RESTIC_TIMEOUT_BACKUP RESTIC_TIMEOUT_CHECK LOCK_ALERT_HOURS HEARTBEAT_MAX_MIN PRUNE_USE_TRASH RCLONE_TIMEOUT'; } > "$TMP/config-old.env"
 run_ok "an older config.env without the new settings still works (lib.sh defaults)" env GB_CONFIG="$TMP/config-old.env" "$REPO_DIR/status.sh" --local
 check "...and prints Overall" grep -q '^Overall:' "$TMP/last.out"
 
