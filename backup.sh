@@ -240,6 +240,7 @@ if [[ -n "$SNAPSHOT" ]]; then
           [[ -z "$resolved_id" ]] || current_id="$resolved_id"
           [[ $state != promoted ]] || promoted=1
         fi
+      elif (( tag_rc == 124 || tag_rc == 137 )); then promotion_failure="restic tag timed out (rc=$tag_rc)"
       elif restic_lock_error "$tag_out"; then promotion_failure="repository is locked"
       else promotion_failure="restic tag failed rc=$tag_rc"; fi
     else promotion_failure="snapshot could not be verified as promoted (snapshot incomplete, missing or without $MODE tag)"; fi

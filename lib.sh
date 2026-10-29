@@ -11,6 +11,9 @@ fi
 source "$GB_CONFIG"
 # defaults for settings added after a config.env was written (older configs keep working)
 : "${RESTIC_TIMEOUT:=3h}" "${RESTIC_TIMEOUT_BACKUP:=12h}" "${RESTIC_TIMEOUT_CHECK:=8h}" "${RCLONE_TIMEOUT:=300}"
+: "${RESTIC_TIMEOUT_META:=10m}" "${RESTIC_TIMEOUT_FORGET:=30m}"
+# An explicitly empty value disables the transport defaults.
+: "${RCLONE_NET_ARGS=--contimeout 30s --timeout 2m --low-level-retries 5}"
 : "${LOCK_ALERT_HOURS:=13}" "${HEARTBEAT_MAX_MIN:=90}" "${PRUNE_USE_TRASH:=1}"
 : "${QUOTA_ALERT_PCT:=90}" "${LOG_RETENTION_DAYS:=0}" "${RESTORE_LOCK_WAIT:=600}"
 : "${ALERT_HOOK:=}" "${ALERT_HOOK_TIMEOUT:=60}" "${ALERT_DEDUPE_HOURS:=24}" "${DRIVE_REPORT:=1}"
@@ -209,20 +212,34 @@ need_creds() {
 }
 RESTIC_OPTS=(); RESTIC_OPTS_TRASH=()
 if is_rclone_repo; then
-  RESTIC_OPTS+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $RCLONE_SERVE_ARGS")
+  RESTIC_OPTS+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $RCLONE_NET_ARGS $RCLONE_SERVE_ARGS")
   # forget/prune delete repository files. PRUNE_USE_TRASH=1 (default): those deletions go to the Drive trash
   # (recoverable for ~30 days, but they count against the Drive quota until Google empties the trash).
   # PRUNE_USE_TRASH=0: they are deleted at once. The flag is always set explicitly (rclone's own default is "trash").
   _ta="${RCLONE_SERVE_ARGS//--drive-use-trash=false/}"; _ta="${_ta//--drive-use-trash=true/}"
   if [[ "${PRUNE_USE_TRASH:-1}" == 1 ]]; then _ta="$_ta --drive-use-trash=true"; else _ta="$_ta --drive-use-trash=false"; fi
-  RESTIC_OPTS_TRASH+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $_ta")
+  RESTIC_OPTS_TRASH+=(-o "rclone.program=$GB_BIN/rclone" -o "rclone.args=serve restic --stdio $RCLONE_NET_ARGS $_ta")
 fi
 # Every restic call is time-limited (a hung Drive call must not hold backup.lock forever).
 # timeout runs restic in its own process group and kills the whole group (restic + its rclone child);
 # -k: SIGKILL 60 s after SIGTERM. Override per call: R_TIMEOUT=<duration|0> R ... (0 = no limit).
 # Exit code 124 = timed out.
-_rt() { local t="${R_TIMEOUT:-${RESTIC_TIMEOUT:-3h}}"
-  if [[ "$t" == 0 ]]; then "$@"; else timeout -k 60 "$t" "$@"; fi; }
+_restic_timeout() {
+  case "$1" in
+    tag|unlock|snapshots|cat) printf '%s' "$RESTIC_TIMEOUT_META";;
+    forget) printf '%s' "$RESTIC_TIMEOUT_FORGET";;
+    *) printf '%s' "$RESTIC_TIMEOUT";;
+  esac
+}
+_rt() { local t="${R_TIMEOUT:-${RESTIC_TIMEOUT:-3h}}" rc=0
+  if [[ "$t" == 0 ]]; then "$@" || rc=$?; else timeout -k 60 "$t" "$@" || rc=$?; fi
+  # backup/check/prune raise their own timeout alerts; the default-bounded metadata steps need one here
+  # (a caller that set its own R_TIMEOUT, e.g. status.sh, handles the failure itself).
+  if (( rc == 124 || rc == 137 )) && [[ "${R_AUTO_LIMIT:-1}" == 1 && "${R_COMMAND:-}" =~ ^(tag|unlock|snapshots|cat|forget)$ ]]; then
+    alert "restic $R_COMMAND timed out (limit $t, rc=$rc)"
+  fi
+  return "$rc"
+}
 # File-only diagnostics; logging must never affect a restic call's streams or result.
 _restic_call_log() {
   local wrapper="$1" caller="${BASH_SOURCE[2]:-$0}" function="${FUNCNAME[2]:-main}"; shift
@@ -233,8 +250,8 @@ _restic_call_log() {
     printf '%q ' "$@"; printf '\n'
   } 2>/dev/null >>"$LOG" || true
 }
-R()  { _restic_call_log R "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS[@]}" "$@"; }
-RT() { _restic_call_log RT "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" "$@"; }   # forget/prune (Drive trash)
+R()  { local R_COMMAND="${1:-}" R_AUTO_LIMIT="${R_TIMEOUT:+0}" R_TIMEOUT="${R_TIMEOUT:-$(_restic_timeout "${1:-}")}"; _restic_call_log R "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS[@]}" "$@"; }
+RT() { local R_COMMAND="${1:-}" R_AUTO_LIMIT="${R_TIMEOUT:+0}" R_TIMEOUT="${R_TIMEOUT:-$(_restic_timeout "${1:-}")}"; _restic_call_log RT "$@"; _rt "$GB_BIN/restic" "${RESTIC_OPTS_TRASH[@]}" "$@"; }   # forget/prune (Drive trash)
 RCL() { timeout -k 30 "${RCLONE_TIMEOUT:-300}" "$GB_BIN/rclone" --config "$RCLONE_CONFIG" "$@"; }
 
 restic_lock_error() { grep -qi 'repository is already locked' "$1"; }

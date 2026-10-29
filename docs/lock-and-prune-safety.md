@@ -63,3 +63,5 @@ An hourly backup with `--wait` (as used by the scheduler) that gives up waiting 
 and records time, mode, reason, holder and waited seconds in `state/backup-skipped`.
 Manual runs without `--wait` and quick runs only log a busy-lock skip and exit 0;
 they create no skip record or skip alert. The next successful hourly backup clears that file.
+
+Drive transport calls use `RCLONE_NET_ARGS` (default `--contimeout 30s --timeout 2m --low-level-retries 5`), before `RCLONE_SERVE_ARGS` so explicit flags there win; an empty value disables these defaults. `RESTIC_TIMEOUT_META` (default `10m`) bounds tag, unlock, snapshots and cat; `RESTIC_TIMEOUT_FORGET` (default `30m`) bounds forget. Other calls retain `RESTIC_TIMEOUT`, and explicit `R_TIMEOUT` overrides all defaults (including `0` for no limit). Timeouts alert and terminate the process group, escalating to KILL after 60 seconds; promotion retries once with the shared plain-unlock budget and re-resolves the snapshot before retrying.
