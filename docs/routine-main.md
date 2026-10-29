@@ -169,24 +169,29 @@ routines or memory. Write only the state files named in step 1.
 
 1. Run exactly this and read its output:
 cd <REPO> || exit 1
+(
+set -eE
+trap 'echo "CHECK FAILED: a command failed at line $LINENO"' ERR
 exec 9> state/alert-check.lock && flock -w 120 9 || { echo "CHECK FAILED: another alert check is still running"; exit 1; }
-./doctor.sh > state/alert-doctor.out 2>&1
+./doctor.sh > state/alert-doctor.out 2>&1 || true
 grep -q '^Overall:' state/alert-doctor.out || { echo "CHECK FAILED: doctor.sh printed no Overall line:"; head -c 300 state/alert-doctor.out; exit 1; }
 { [ -s state/ALERT ] && awk '{print "alert " $0 "\t" $0}' state/ALERT
   awk -F: '/^PROBLEM/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' state/alert-doctor.out
 } > state/alert-current.tsv
 touch state/alert-reported
-awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' state/alert-current.tsv state/alert-reported > state/alert-reported.new && mv state/alert-reported.new state/alert-reported
+awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' state/alert-current.tsv state/alert-reported > state/alert-reported.new
+mv state/alert-reported.new state/alert-reported
 awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' state/alert-reported state/alert-current.tsv > state/alert-new.tsv
 cut -f1 state/alert-new.tsv >> state/alert-reported
 echo "--- new problems:"
 cut -f2 state/alert-new.tsv
-2. If the output starts with "CHECK FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
+)
+2. If any output line starts with "CHECK FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
 ALERT CHECK: nothing new
 3. Otherwise the first line is exactly:
 ALERT CHECK: NEW PROBLEMS, parent: tell the owner now
 Then the printed problem lines, unchanged.
-4. If step 1 fails or prints "CHECK FAILED:", the first line is exactly:
+4. If step 1 fails or prints a "CHECK FAILED:" line, the first line is exactly:
 ALERT CHECK: FAILED
 Then the printed error text (at most 300 bytes). No logs, no message content, no secrets.
 ```
