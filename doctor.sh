@@ -90,31 +90,38 @@ elif isnum "$first" && (( now - first >= ${FIRST_SUCCESS_GRACE_HOURS:-2} * 3600 
   row PROBLEM "last backup" "no complete hourly backup yet, $(( (now - first) / 3600 )) h after the first start; run ./backup.sh and read its output"
 else row WARN "last backup" "none yet (just installed; the first hourly run or ./backup.sh creates it)"; fi
 
-# --- hourly slots: completed local clock hours only; the partial install hour is excused.
+# --- hourly slots: completed local clock hours after installation and history recording began.
 window=$(num_ok "$HOURLY_SLOT_WINDOW_H"); window=${window:-24}
 miss_warn=$(num_ok "$HOURLY_MISS_WARN"); miss_warn=${miss_warn:-1}
 skipped_backup || true
-mapfile -t slots < <(python3 - "$GB_STATE/hourly-history" "$now" "$window" "$miss_warn" "${first:-0}" "${SKIP_TIME:-0}" "$SKIP_HOLDER" <<'PY'
+mapfile -t slots < <(python3 - "$GB_STATE/hourly-history" "$now" "$window" "$miss_warn" "${first:-0}" "${SKIP_TIME:-0}" "$SKIP_HOLDER" "${ok_t:-0}" <<'PY'
 import re, sys, time
-path, now, window, warn, first, skip, holder = sys.argv[1:]
+path, now, window, warn, first, skip, holder, last_success = sys.argv[1:]
 now, window, warn, first, skip = map(int, (now, window, warn, first, skip))
 history = []
+invalid = False
 try:
     for line in open(path):
         value = line.strip()
         if not re.fullmatch(r'[0-9]{1,10}', value) or not 0 < int(value) < 8589934592:
             raise ValueError('invalid epoch')
         history.append(int(value))
+except FileNotFoundError:
+    pass
 except (OSError, ValueError, UnicodeError):
     history = []
+    invalid = True
 if not history:
     fresh = first > 0 and now - first < 86400
-    print('OK' if fresh else 'WARN')
-    print('no history yet' if fresh else 'no hourly history (state/hourly-history missing)')
+    starting = not invalid and int(last_success) > 0
+    print('OK' if starting or fresh else 'WARN')
+    print('history starting (no hourly history yet)' if starting else
+          'no history yet' if fresh else 'no hourly history (state/hourly-history missing)')
 else:
     clock = time.localtime(now)
     end = now - clock.tm_min * 60 - clock.tm_sec
-    start = max(end - window * 3600, first, 0)
+    # Excuse the partial hour when recording began, including on upgraded installs.
+    start = max(end - window * 3600, first, min(history), 0)
     # Bound work even if a window is configured larger than the retained history.
     covered = {end + (t - end) // 3600 * 3600 for t in history if t < end}
     count = max(0, (end - start) // 3600)

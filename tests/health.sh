@@ -779,12 +779,20 @@ chmod +x "$TMP/clockbin/date"
 hour=$(( FIXED_NOW / 3600 * 3600 ))
 vdoc() { PATH="$TMP/clockbin:$PATH" GB_CONFIG="${1:-$vc}" "$REPO_DIR/doctor.sh" >"$TMP/visibility.out" 2>&1 || true; }
 vstatus() { PATH="$TMP/clockbin:$PATH" GB_CONFIG="$vc" "$REPO_DIR/status.sh" --local >"$TMP/visibility-status.out" 2>&1; }
-vhistory() { local h; for h in {1..24}; do [[ "$h" == "${1:-0}" ]] || echo "$(( hour - h * 3600 + 1020 ))"; done > "$V/hourly-history"; }
+vhistory() { local h; for h in {1..25}; do [[ "$h" == "${1:-0}" ]] || echo "$(( hour - h * 3600 + 1020 ))"; done > "$V/hourly-history"; }
 echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"
 echo "$(( FIXED_NOW - 60 ))" > "$V/last-success"
 echo "$FIXED_NOW" > "$V/last-success-quick"
 printf 'result=ok\ntime=%s\npruned=1\nprune_skip=\n' "$FIXED_NOW" > "$V/last-check.result"
 echo "$FIXED_NOW" > "$V/last-check"
+vdoc
+check "upgraded install with last-success but no history -> OK history starting" grep -q '^OK *hourly slots: history starting' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 3600 ))" > "$V/hourly-history"; vdoc
+check "first recorded success an hour ago excuses pre-upgrade hours" grep -q '^OK *hourly slots: 0 missed of 0 completed hours' "$TMP/visibility.out"
+printf '%s\n' "$(( hour - 4 * 3600 + 1020 ))" "$(( hour - 3600 + 1020 ))" > "$V/hourly-history"; vdoc
+missed_hours=$(TZ=UTC date -d "@$(( hour - 3 * 3600 ))" +%H:00)
+missed_hours+=", $(TZ=UTC date -d "@$(( hour - 2 * 3600 ))" +%H:00)"
+check "post-upgrade history gap -> WARN naming only hours after history began" grep -q "^WARN *hourly slots: 2 missed of 3 completed hours: $missed_hours$" "$TMP/visibility.out"
 vhistory; vdoc
 check "all 24 completed hours covered -> hourly slots OK" grep -q '^OK *hourly slots: 0 missed of 24 completed hours' "$TMP/visibility.out"
 vhistory 3; vdoc
@@ -801,7 +809,7 @@ vc2=$(mkcfg visibility-window "GB_STATE=$V" 'HOURLY_SLOT_WINDOW_H=2')
 vdoc "$vc2"
 check "configured two-hour window excludes the older hole" grep -q '^OK *hourly slots: 0 missed of 2 completed hours' "$TMP/visibility.out"
 vc2=$(mkcfg visibility-local "GB_STATE=$V" 'export TZ=Asia/Kolkata')
-for h in {1..24}; do [[ "$h" == 3 ]] || echo "$(( FIXED_NOW - h * 3600 ))"; done > "$V/hourly-history"
+for h in {1..25}; do [[ "$h" == 3 ]] || echo "$(( FIXED_NOW - h * 3600 ))"; done > "$V/hourly-history"
 vdoc "$vc2"
 missed_hour=$(TZ=Asia/Kolkata date -d "@$(( FIXED_NOW - 3 * 3600 ))" +%H:00)
 check "slots and labels follow local clock hours in a half-hour time zone" grep -q "^WARN *hourly slots: 1 missed of 24 completed hours: $missed_hour" "$TMP/visibility.out"
@@ -809,12 +817,17 @@ echo "$(( FIXED_NOW - 7200 ))" > "$V/first-start"
 printf '%s\n' "$(( hour - 7200 + 1800 ))" "$(( hour - 3600 + 1800 ))" > "$V/hourly-history"
 vdoc
 check "two-hour-old install with two successes is not blamed for earlier hours" grep -q '^OK *hourly slots: 0 missed' "$TMP/visibility.out"
+echo "$(( hour - 5 * 3600 ))" >> "$V/hourly-history"; vdoc
+check "later first-start excuses gaps in older history" grep -q '^OK *hourly slots: 0 missed of 1 completed hours' "$TMP/visibility.out"
+rm -f "$V/last-success"
 rm -f "$V/hourly-history"; vdoc
 check "fresh install with missing history -> OK no history yet" grep -q '^OK *hourly slots: no history yet' "$TMP/visibility.out"
 echo "$(( FIXED_NOW - 48 * 3600 ))" > "$V/first-start"; vdoc
 check "old install without history -> WARN with state path" grep -q '^WARN *hourly slots: no hourly history (state/hourly-history missing)' "$TMP/visibility.out"
 printf '%s\n1e9999\n' "$FIXED_NOW" > "$V/hourly-history"; vdoc
 check "garbled history -> same warning, no arithmetic failure" all grep -q '^WARN *hourly slots: no hourly history' "$TMP/visibility.out" --and-- not grep -q 'Traceback\|syntax error' "$TMP/visibility.out"
+echo "$(( FIXED_NOW - 60 ))" > "$V/last-success"; vdoc
+check "last-success does not excuse garbled history" grep -q '^WARN *hourly slots: no hourly history' "$TMP/visibility.out"
 vhistory 1
 echo "$FIXED_NOW" >> "$V/hourly-history"; vdoc
 check "a success in the current hour never fills a previous hole" grep -q '^WARN *hourly slots: 1 missed' "$TMP/visibility.out"
