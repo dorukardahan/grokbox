@@ -101,7 +101,10 @@ elif cmd=='tag':
     if '--add' in args: snap['tags'].append(args[args.index('--add')+1])
     snapshot.write_text(json.dumps(snap))
     if duplicate or n<=int(os.environ.get('TAG_PARTIAL','0')): sys.exit(1)
+elif cmd=='list':
+    if args[1:2]==['locks'] and (root/'repo-lock').exists(): print('0123456789abcdef')
 elif cmd=='unlock':
+    if (root/'repo-lock').exists(): print('successfully removed 1 locks')
     (root/'repo-lock').unlink(missing_ok=True)
 elif cmd=='stats':
     print(json.dumps({'total_size':42}))
@@ -117,6 +120,7 @@ elif cmd=='backup':
         sys.exit(1)
     old_snapshot.unlink(missing_ok=True)
     assert os.environ.get('RESTIC_PROGRESS_FPS') == '0.01'
+    if os.environ.get('LEAK_OWN_LOCK')=='1': (root/'repo-lock').touch()   # lock outlives this process
     print(json.dumps({'message_type':'status','percent_done':0.5}))
     if os.environ.get('NOTICE')=='1': print('rclone: rate limit notice')
     if os.environ.get('MALFORMED')=='1': print('{bad json')
@@ -377,6 +381,26 @@ for scenario in tag snapshots snapshots-tail recover unlock forget; do
   check "$scenario raises clear timeout alert" grep -q "restic $HANG_COMMAND timed out" "$TMP/state/ALERT"
 done
 unset HANG_COMMAND HANG_COUNT
+
+# The backup's own restic process exits but its lock stays in the repository (observed after a VM pause).
+reset_promotion
+export LEAK_OWN_LOCK=1
+check 'own leaked lock: backup completes' run_backup 0
+check 'own leaked lock: promotion succeeds on the first tag' test "$(grep -c '^tag ' "$TMP/args")" = 1
+check 'own leaked lock: cleaned with one plain unlock before promotion' python3 - "$TMP/args" <<'PYORDER'
+import sys
+cmds=[l.split()[0] for l in open(sys.argv[1]) if l.split()[0] in ('backup','list','unlock','tag')]
+assert cmds==['backup','list','unlock','tag'], cmds
+PYORDER
+check 'own leaked lock: never uses remove-all' not grep -q -- '--remove-all' "$TMP/args"
+check 'own leaked lock: no alert raised' test ! -s "$TMP/state/ALERT"
+check 'own leaked lock: cleanup is logged' grep -q 'removed 1 stale lock(s) left behind by this backup' "$TMP/logs/backup-$(date +%Y-%m).log"
+check 'own leaked lock: snapshot verified' verified_snapshot
+unset LEAK_OWN_LOCK
+reset_promotion
+check 'clean repo: no unlock before promotion' run_backup 0
+check 'clean repo: only a read-only lock listing' test "$(grep -cx unlock "$TMP/args")" = 0
+check 'clean repo: no alert raised' test ! -s "$TMP/state/ALERT"
 
 reset_promotion
 export TAG_LOCKED=1

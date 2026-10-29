@@ -36,6 +36,10 @@ is the only supported version.
   scheduled prompt. The handoff line is unchanged. `tests/ci-install.sh` checks the numbering.
 
 ### Fixed
+- A backup no longer trips over its own restic lock: when the backup's restic process has exited but its lock is still
+  in the repository (seen after a VM pause during the backup's start), snapshot promotion now lists locks first and,
+  only if one is there, runs the stale-only unlock quietly before promoting. Promotion succeeds on the first try with no
+  unlock alert; the cleanup is logged and uses the shared single-unlock budget.
 - A Drive call that goes silent (for example after a VM pause) can no longer hang a backup step for hours: rclone gets
   transport timeouts (`RCLONE_NET_ARGS`), `restic tag/unlock/snapshots/cat` are limited to `RESTIC_TIMEOUT_META` (10m) and
   `forget` to `RESTIC_TIMEOUT_FORGET` (30m), a timeout raises an alert, and a timed-out snapshot promotion is retried once

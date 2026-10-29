@@ -218,6 +218,27 @@ else:
     print("missing")
 PYPROMOTE
 }
+# The backup's own restic process has exited, so a lock it left in the repository is stale (dead PID, same host) and
+# would block the exclusive promotion lock for its whole wait. After a silent Drive retry (for example across a VM
+# pause) a duplicate lock file can survive restic's own cleanup. Look first (read-only); only when a lock is there run
+# the stale-only unlock, quietly. It spends the shared unlock budget but raises no alert: this is expected cleanup.
+clear_own_stale_lock() {
+  local ids rc=0 out removed
+  ids=$(R_TIMEOUT="$RESTIC_TIMEOUT_META" R list locks --no-lock 2>>"$LOG") || rc=$?
+  if (( rc != 0 )); then log "backup ($MODE): WARN could not list locks before promotion (rc=$rc); promotion tries anyway"; return 0; fi
+  [[ -n "$ids" && $GB_UNLOCK_DONE == 0 ]] || return 0
+  GB_UNLOCK_DONE=1
+  out=$(mktemp "$GB_STATE/promote-unlock.XXXXXX")
+  R unlock >"$out" 2>&1 || rc=$?
+  cat "$out" >>"$LOG"
+  removed=$(sed -n 's/^successfully removed \([0-9][0-9]*\) locks*.*/\1/p' "$out" | tail -1)
+  rm -f "$out"
+  if (( rc != 0 )); then log "backup ($MODE): WARN stale-lock cleanup before promotion failed rc=$rc; promotion tries anyway"
+  elif [[ -n "$removed" && "$removed" != 0 ]]; then
+    log "backup ($MODE): removed $removed stale lock(s) left behind by this backup's own restic process before promotion"
+  fi
+}
+[[ -z "$SNAPSHOT" ]] || clear_own_stale_lock
 promoted=0; promotion_failure="snapshot missing"; current_id="$SNAPSHOT"
 if [[ -n "$SNAPSHOT" ]]; then
   for attempt in 1 2; do
