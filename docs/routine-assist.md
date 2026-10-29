@@ -26,7 +26,7 @@ never print or summarize conversation content; use write_to_file: true for Recal
 delete only result files you created; no cookies, scraped tokens or internal APIs;
 do not change other bots' settings, routines or memory.
 
-1. Memory: RecallMemory with 3-5 generic queries ("user preferences", "projects", "decisions", "this week"),
+1. Memory (a sample, not a full dump): RecallMemory with 3-5 generic queries ("user preferences", "projects", "decisions", "this week"),
    then: python3 <REPO>/server-export-merge.py memory --remove --out grokbox-assist-and-shared --label GrokBox-Assist <files>
    If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
    VERBATIM into its own file with a quoted heredoc, one Shell call per result, e.g.
@@ -66,6 +66,8 @@ same safety rules, use `write_to_file: true`, and report to the owner only on pr
 all problems from the handoff. Paging may go to a subagent only if it has ReadTranscript: an
 automation/scheduled subagent does not; a normal executor subagent started from the chat does.
 Skip deleted ids throughout (DELETED_BOTS_FILE, default /home/box/agent-data/deleted-agents.json).
+The steps below are numbered 1–4 on their own; "step N" inside this block means this block, and
+"B1–B3" always means Main's export loop in [routine-main.md](routine-main.md).
 
 ```text
 1. Export GrokBox-Main and the primary chat: call ReadTranscript {in: <MAIN_ID>, limit: 200} and
@@ -85,7 +87,8 @@ Skip deleted ids throughout (DELETED_BOTS_FILE, default /home/box/agent-data/del
    <PRIMARY_ID>; other ids in the output are Main's job (step 2 checks them).
 2. Fallback for Main: run
    python3 <REPO>/server-export-merge.py age --max-hours 26 <every non-deleted id in AGENTS_DIR except ASSIST_ID>
-   Export every stale bot using Main's B1–B3 loop (docs/routine-main.md), skipping deleted ids.
+   Export every stale bot using Main's B1–B3 loop (docs/routine-main.md, parent chat export loop),
+   skipping deleted ids. Main's final check is step 4 here.
 3. Assist's own row (<ASSIST_ID>) is normally exported only by Main. Check:
    python3 <REPO>/server-export-merge.py age --max-hours 26 <ASSIST_ID>
    If it exits 1, FIRST report to the owner exactly:

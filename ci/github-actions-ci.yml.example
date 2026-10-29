@@ -1,3 +1,5 @@
+# Grok Box CI. To enable: copy this file to .github/workflows/ci.yml (pushing a workflow file needs a token with the
+# 'workflow' scope). Runs shellcheck and every test suite on pushes to main and on pull requests.
 name: CI
 
 on:
@@ -8,9 +10,14 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -25,14 +32,29 @@ jobs:
           shopt -s nullglob
           shellcheck --severity=warning ./*.sh rebuild-kit/*.sh tests/*.sh
 
-      - name: Smoke test
+      # smoke.sh downloads the pinned restic + rclone into bin/; the suites below reuse them
+      - name: Smoke test (tests/smoke.sh)
         run: bash tests/smoke.sh
 
-      - name: Extra test suites
+      - name: CI, checksums and docs (tests/ci-install.sh)
+        run: bash tests/ci-install.sh
+
+      - name: Health checks and alerts (tests/health.sh)
+        run: bash tests/health.sh
+
+      - name: Locks and snapshot promotion (tests/locks.sh)
+        run: bash tests/locks.sh
+
+      - name: Maintenance (tests/maintenance.sh)
+        run: bash tests/maintenance.sh
+
+      - name: Any other test suites
         run: |
           shopt -s nullglob
           for t in tests/*.sh; do
-            [[ "$t" == "tests/smoke.sh" ]] && continue
+            case "$t" in
+              tests/smoke.sh|tests/ci-install.sh|tests/health.sh|tests/locks.sh|tests/maintenance.sh) continue;;
+            esac
             echo "=== Running $t ==="
             bash "$t"
           done

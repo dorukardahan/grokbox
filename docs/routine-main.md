@@ -22,6 +22,12 @@ problems. Partner: [routine-assist.md](routine-assist.md); setup: [bots.md](bots
 - **Schedule:** daily at `<HOUR>`. GrokBox-Assist runs a few hours later.
 - **Result:** always return the parent-chat handoff. Only the parent chat reports problems to the owner, in `<LANGUAGE>`.
 
+## Step names
+One numbering for both parts, so every step name is unique:
+- **A1–A3** and **B4–B6** run in the scheduled prompt (health, memory, partner check, INDEX).
+- **B1–B3** are the transcript export loop. They run only in the parent chat, followed by its
+  **final check** (INDEX.md + `export-freshness.sh`). The handoff line names this loop as "(B1–B3)".
+
 ## Scheduled run
 Store only this prompt in `UpdateRoutine`. Do not attempt B1–B3 here.
 ```text
@@ -58,7 +64,7 @@ A3. Otherwise run ./status.sh (full) and collect the "!!" lines.
     Leave alerts visible for the parent chat. ./doctor.sh is a one-screen check.
 
 PART B - memory, partner check and handoff (B1–B3 run in the parent chat)
-B4. Memory: call RecallMemory with about 10 generic queries ("user preferences", "projects", "bots and agents",
+B4. Memory (a sample, not a full dump): call RecallMemory with about 10 generic queries ("user preferences", "projects", "bots and agents",
     "routines", "accounts and services", "decisions", "people", "this week", the current month name), then:
     python3 <REPO>/server-export-merge.py memory --remove --out grokbox-main-and-shared --label GrokBox-Main <files>
     If RecallMemory has no write_to_file option (it then returns the result inline), paste each result
@@ -108,12 +114,12 @@ B3. For each "id": N call ReadTranscript {in: id, limit: 200, before: N}; for "i
     For a long backlog you may also request
     before = N-35, N-70, ... in parallel (overlaps are de-duplicated, gaps reappear). Stop after 30 rounds
     and report if not done.
-B7. Read <REPO>/staging/server-export/INDEX.md. Report rows with status "gap" or warnings. Do not report
-    "empty" / "not readable" rows, except a bot that was readable before and now is not.
+Final check (after B3): read <REPO>/staging/server-export/INDEX.md. Report rows with status "gap" or
+    warnings. Do not report "empty" / "not readable" rows, except a bot that was readable before and now is not.
 Then run: cd <REPO> && ./export-freshness.sh
 It must print "daily export OK"; otherwise report the problem to the owner.
 ```
 
 ## First run
-After creating the scheduled routine, run health and memory steps once, and run B1–B3 in the chat
-right away. The first export may need many paging rounds; later exports fetch what is new.
+After creating the scheduled routine, run health and memory steps once, and run B1–B3 and the
+final check in the chat right away. The first export may need many paging rounds; later exports fetch what is new.

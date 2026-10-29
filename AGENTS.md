@@ -32,6 +32,14 @@ small 15 GB Drive, `PRUNE_USE_TRASH=0` to delete at once instead of the Drive tr
 Defaults: roots `/workspace /home/box`, hourly 24 / daily 30 / weekly 12 / monthly 12,
 quick snapshots every 15 min kept 24 h, `TZ=UTC`, Drive folder `GrokBox/restic`.
 
+**Always ask the owner these two, then write the answers into `config.env`:**
+- **Time zone:** set `TZ` (the line `export TZ=UTC`) to the owner's zone, e.g. `Europe/Berlin`. All
+  schedule times (hourly :17, daily check 04:40, weekly test restore) and log times use `TZ`.
+- **Credentials in the backup:** `BACKUP_SECRETS=1` (default) puts credential files (tokens, `~/.ssh`,
+  `~/.config` logins, CLI logins, rclone config, `.env` files...) inside the encrypted backup. Anyone with
+  the restic password and access to the Drive folder can restore them. `BACKUP_SECRETS=0` leaves them
+  out (then they must be re-created by hand after a disaster). Let the owner decide; do not pick for them.
+
 ### 2. Install the binaries
 ```bash
 ./install.sh
@@ -86,9 +94,26 @@ If the dry run or backup exits with 4, the stale guard tripped: see rule 3. On e
 ./install.sh --schedule             # starts scheduler.sh (idempotent: no-op if running)
 ./status.sh                         # expect "Overall: OK" once the first snapshot exists
 ```
-The scheduler is a background process: it **dies on a box move** (and with it all backups). That is what step 8 fixes.
+The scheduler is a background process: it **dies on a box move** (and with it all backups). That is what step 10 fixes.
 
-### 8. Create the two Grok Box bots: GrokBox-Main and GrokBox-Assist (do this yourself)
+### 8. First restore drill
+A backup that was never restored is not tested. Once the first full backup from step 6 has finished
+(`./status.sh` shows a last hourly snapshot):
+```bash
+./test-restore.sh                   # restores a sample into a private dir, verifies checksums, deletes it
+./doctor.sh                         # the "test restore" line must be OK
+./restore.sh list                   # the snapshots are there
+```
+Exit 75 means the backup lock is busy: retry in a few minutes. If the test restore fails, stop and tell
+the owner (see `docs/runbooks.md`).
+
+### 9. [HUMAN] Choose an alert channel
+By default alerts only go to `state/ALERT` + `logs/alerts.log` and (after step 10) the bots' daily reports. Ask the owner where they want
+alerts sent (e-mail, chat webhook, push service...) - never pick one for them. Then set `ALERT_HOOK` in
+`config.env`: a command that receives the alert text on stdin. Examples and details:
+`docs/health-and-alerts.md`. If the owner wants no extra channel, leave it empty.
+
+### 10. Create the two Grok Box bots: GrokBox-Main and GrokBox-Assist (do this yourself)
 A box backup alone misses what lives only on the Grok Bot servers: every bot's full conversation history
 and the bots' memory. They can only be read with the Grok Bot tools `ReadTranscript` and `RecallMemory`.
 These are **bot tools**: no script, cron or `scheduler.sh` can call them, and you must never use cookies,
@@ -130,11 +155,22 @@ Steps:
 Both parent chats report to the user **only on problems**: `Overall` not OK, Drive re-consent needed, stale
 guard, export gaps, or a missed partner run. Details: [docs/server-export.md](docs/server-export.md).
 
-### 9. Finish
+### 11. Fill the expected-bot roster
+Once the first export is complete, set `EXPECTED_BOTS` in `config.env` to the bots that must be in every
+server-side export (names or agent ids), at least `("GrokBox-Main" "GrokBox-Assist")` plus the owner's
+important bots. Real bot names go **only** into the local `config.env`, never into the repo, an issue or a
+commit. Then run:
+```bash
+./expected-bots.sh                  # expect "all N expected bots present and complete ..."
+```
+Bots deleted later are recognised through `DELETED_BOTS_FILE`; list retired ones in `RETIRED_BOTS`.
+
+### 12. Finish
 Tell the user, briefly: what is backed up, the schedule, where the repo is (`Drive: GrokBox/restic`), and remind them
 about the three things they must keep outside the box: the restic password, the OAuth client JSON, and their Google
 account access. Say that GrokBox-Main and GrokBox-Assist now run the backups every day (box health + every bot's server-side
-conversation history and the shared memory), and that they only report problems.
+conversation history and a sample of the shared memory: RecallMemory answers about 10 generic queries,
+not a full dump), and that they only report problems.
 Mention what still cannot be backed up (README "Limits": bots' private memory other than the two Grok Box bots', Pages, connector grants, app-managed secrets).
 
 ## Day-to-day commands

@@ -7,7 +7,8 @@ directory (default `/workspace/grokbox`).
 ## 1. After any box move (files still there)
 1. Wait ~15 minutes after boot: the platform may still be copying files back (the hydration guard and the minimum-uptime guard skip backups meanwhile).
 2. `./install.sh --schedule` - verifies the binaries (re-downloads if missing), restarts the scheduler (hourly + quick snapshots,
-   daily check, watchdog). It is idempotent. The daily watchdog routine from AGENTS.md step 8 does this automatically.
+   daily check, watchdog). It is idempotent. The daily routines of GrokBox-Main and GrokBox-Assist (AGENTS.md step 10)
+   run `./install.sh --schedule` every day, so this happens automatically within a day.
    If the `RESTIC_BACKUP_PASSWORD` box secret exists and `secrets/restic-pass` is missing, `install.sh` recreates the file.
 3. `./status.sh` - check the last snapshot time and any `!!` ALERT banner (`./status.sh --ack` once handled).
 4. If the stale-computer guard tripped (alert says STALE-COMPUTER GUARD; `state/GUARD_TRIPPED` blocks forget/prune): do not force. Compare
@@ -37,7 +38,9 @@ used your own client) and **access to your Google account**.
    `-wal`/`-shm` files aside; copy the consistent copy into place; run `sqlite3 <path> 'PRAGMA integrity_check'` (or
    `python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute('pragma integrity_check').fetchone()[0])" <path>`), expect `ok`; then restart the app). Brain-export copies of stores outside the roots are under `staging/brain/stores/`.
 5. With `BACKUP_SECRETS=1` (default) credential files, `~/.config`, CLI logins and rclone config come back with the files. The repo's own
-   `secrets/restic-pass` is the one thing that does not (restore step 2). Then `./install.sh --schedule` and re-create the watchdog routine.
+   `secrets/restic-pass` is the one thing that does not (restore step 2). Then `./install.sh --schedule`. The GrokBox-Main and GrokBox-Assist bots and their daily
+   routines live on the platform, not on the box: check that both routines still exist, and if not, set them up again
+   (AGENTS.md step 10).
 6. Tool inventory: `state/rebuild-kit/inventory.txt` (refreshed daily; inside the snapshot) lists installed CLIs, apt manual packages,
    npm/uv tools; `state/rebuild-kit/venvs/*.txt` are pip freezes of every venv. Venvs and model caches are in the backup by default; the
    freezes are the fallback when a restored venv does not run on a new image.

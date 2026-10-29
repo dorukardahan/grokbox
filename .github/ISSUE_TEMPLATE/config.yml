@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a vulnerability privately
+    url: https://github.com/dorukardahan/grokbox/security/advisories/new
+    about: Security problems go here, never into a public issue.
+  - name: Documentation (README)
+    url: https://github.com/dorukardahan/grokbox#readme
+    about: Setup, schedule, limits and restore.
+  - name: Runbooks (repair, undo a prune, wrong host)
+    url: https://github.com/dorukardahan/grokbox/blob/main/docs/runbooks.md
+    about: Step-by-step recovery procedures.

@@ -1,0 +1,81 @@
+name: Bug report
+description: Something in Grok Box does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. This is a public issue tracker, so **redact before you paste**:
+        replace agent/bot ids, snapshot ids, host names, Drive folder names, e-mail addresses,
+        bot names (other than GrokBox-Main / GrokBox-Assist) and any conversation or memory text
+        with placeholders such as `<id>` or `<host>`.
+
+        **Never paste** `config.env`, anything from `secrets/`, `rclone.conf`, the restic password,
+        OAuth client JSON, tokens, auth URLs or webhook URLs.
+
+        Found a security vulnerability? Do not open an issue: see [SECURITY.md](https://github.com/dorukardahan/grokbox/blob/main/SECURITY.md).
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you run, and what went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ./install.sh --schedule
+        2. ./status.sh
+        3. ...
+    validations:
+      required: false
+  - type: textarea
+    id: doctor
+    attributes:
+      label: "`./doctor.sh --json` output (redacted)"
+      description: Run it in the repo directory. Redact the `host` field and any ids or names.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines (redacted)
+      description: Only the lines around the problem, from `logs/backup-YYYY-MM.log` or `logs/alerts.log`.
+      render: text
+    validations:
+      required: false
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: "`git rev-parse --short HEAD`, and the first three lines of `bin/VERSIONS` (architecture + pinned restic/rclone versions)."
+      placeholder: |
+        commit: abcdef1
+        bin/VERSIONS: ...
+    validations:
+      required: true
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Environment
+      options:
+        - Grok Bot box
+        - Other Linux machine
+    validations:
+      required: true
+  - type: checkboxes
+    id: redaction
+    attributes:
+      label: Redaction
+      options:
+        - label: I removed ids, emails, bot names, hostnames, tokens and conversation text
+          required: true

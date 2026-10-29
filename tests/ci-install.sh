@@ -37,6 +37,11 @@ check "ci.yml pins actions/checkout to a commit SHA (# v4)" grep -qE 'actions/ch
 check "ci.yml runs shellcheck" grep -q 'shellcheck' "$CI_YML"
 check "ci.yml runs tests/smoke.sh" grep -q 'bash tests/smoke.sh' "$CI_YML"
 check "ci.yml loops over other tests/*.sh files" grep -q 'for t in tests/\*\.sh' "$CI_YML"
+for t in ci-install health locks maintenance; do
+  check "ci.yml runs tests/$t.sh in its own step" grep -q "run: bash tests/$t\.sh" "$CI_YML"
+done
+check "ci.yml sets a job timeout" grep -qE 'timeout-minutes:[[:space:]]*[0-9]+' "$CI_YML"
+check "ci.yml cancels superseded runs per ref" grep -qE 'cancel-in-progress:[[:space:]]*true' "$CI_YML"
 
 step "2. Pinned checksums (checksums.txt + install.sh verification)"
 SUMS="$REPO_DIR/checksums.txt"
@@ -230,6 +235,12 @@ check "AGENTS.md references docs/runbooks.md" grep -q "docs/runbooks.md" "$REPO_
 
 
 check "Main scheduled prompt requires exact parent handoff" grep -Fxq 'EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop (B1–B3) now' "$REPO_DIR/docs/routine-main.md"
+check "Main parent export loop is numbered B1–B3 with no step after it reusing a B number" bash -c '
+  loop=$(sed -n "/^## Parent chat: export loop/,/^## First run/p" "$1")
+  grep -q "^B1\. " <<<"$loop" && grep -q "^B2\. " <<<"$loop" && grep -q "^B3\. " <<<"$loop" && ! grep -qE "^B[4-9]\. " <<<"$loop"' _ "$REPO_DIR/docs/routine-main.md"
+check "Main scheduled prompt keeps B4–B6 and never runs B1–B3" bash -c '
+  sched=$(sed -n "/^## Scheduled run/,/^## Parent chat: export loop/p" "$1")
+  grep -q "^B4\. " <<<"$sched" && grep -q "^B6\. " <<<"$sched" && ! grep -qE "^B[1-3]\. " <<<"$sched"' _ "$REPO_DIR/docs/routine-main.md"
 check "Assist scheduled prompt requires exact parent handoff" grep -Fxq 'EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop now' "$REPO_DIR/docs/routine-assist.md"
 check "daily export check is executable and documented" bash -c 'test -x "$1/export-freshness.sh" && grep -q "export-freshness.sh" "$1/README.md"' _ "$REPO_DIR"
 

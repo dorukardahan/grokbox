@@ -10,9 +10,46 @@ no server run by anyone else.
 git clone https://github.com/dorukardahan/grokbox /workspace/grokbox
 ```
 **Using a Grok Bot?** Paste the repo link to it: [AGENTS.md](AGENTS.md) tells it exactly what to do and which three
-steps need you (Google Cloud OAuth client, one consent click, saving the restic password).
+steps need you (Google Cloud OAuth client, one consent click, saving the restic password), plus a few choices it asks
+you about (time zone, whether credentials go into the backup, where alerts are sent).
 
 Inspired by the community restic setup idea.
+
+> **Status & disclaimer**
+> - A community project, maintained best-effort. Provided **as is** under the MIT license, with no warranty.
+> - Backups can fail. Test your restores (`./test-restore.sh`, `./doctor.sh`); you are responsible for your data.
+> - **Credentials are backed up by default** (`BACKUP_SECRETS=1`): tokens and logins on the box end up inside the
+>   encrypted repository. See [What is and is not backed up](#what-is-and-is-not-backed-up).
+> - Not affiliated with Google, restic, rclone or the Grok Bot platform.
+>
+> Contributing: [CONTRIBUTING.md](CONTRIBUTING.md). Security reports: [SECURITY.md](SECURITY.md).
+
+## Requirements & platform assumptions
+- A Linux box (amd64 or arm64) with bash 4+, `python3` (standard library only; SQLite copies use its `sqlite3`
+  module), `curl` (or `wget`) and coreutils/util-linux (`timeout`, `flock`, `sha256sum`). No root. The `sqlite3`
+  command-line tool is optional (handy for the integrity check in [REBUILD.md](REBUILD.md)).
+- `./install.sh` downloads two programs into `bin/`: [restic](https://restic.net) and [rclone](https://rclone.org), at the
+  versions pinned in `config.env.example` (`PINNED_RESTIC`, `PINNED_RCLONE`), checked against [checksums.txt](checksums.txt)
+  and the upstream `SHA256SUMS`.
+- A Google account with Drive, and (recommended) your own Google OAuth client ([docs/google-cloud-setup.md](docs/google-cloud-setup.md)).
+
+Grok Bot defaults, all changeable in `config.env`:
+
+| setting | default | what it assumes |
+|---|---|---|
+| `BACKUP_ROOTS` | `(/workspace /home/box)` | the persistent folders of a Grok Bot box |
+| `AGENTS_DIR` | `/home/box/agent-data/agents` | one folder per bot (`<id>/profile.json`) |
+| `DELETED_BOTS_FILE` | `/home/box/agent-data/deleted-agents.json` | the platform's list of deleted bots |
+| `BRAIN_AGENT_DIRS` | `(/home/box/agent-data /home/box/sand-data)` | agent data folders for the brain export |
+| `STORES_GLOB` | `/cursor/stores/*` | mounted agent stores, mirrored by the brain export |
+| `SQLITE_GLOBS` | databases under the three paths above | live databases copied consistently |
+| `HYDRATION_LOG` | `/tmp/sand-copy-in.log` (`HYDRATION_OK_PATTERN='outcome=hydrated'`) | log written while a moved box is refilled |
+
+| works on any Linux machine | needs a Grok Bot |
+|---|---|
+| backup, restore, `doctor.sh`, `status.sh`, the scheduler, test restores, check/prune, alerts | the server-side export (GrokBox-Main / GrokBox-Assist, `ReadTranscript`, `RecallMemory`), the expected-bot roster, the brain export of agent stores |
+
+Details, file formats and how to run without a Grok Bot: [docs/platform-contract.md](docs/platform-contract.md).
 
 ## How it works
 ```mermaid
@@ -53,6 +90,9 @@ flowchart TB
 Templates: [docs/routine-main.md](docs/routine-main.md), [docs/routine-assist.md](docs/routine-assist.md).
 
 ## Schedule (times in `TZ`, default UTC; all configurable in `config.env`)
+All times below are in `TZ`, which is **UTC unless you change it**: set `export TZ=...` in `config.env` to your own
+zone (e.g. `Europe/Berlin`) so the slots and log times match your day.
+
 | when | what | tag | retention |
 |---|---|---|---|
 | every hour at :17 | full snapshot + brain export + SQLite copies + forget | `auto` | hourly 24, daily 30, weekly 12, monthly 12 |
@@ -104,6 +144,14 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
   password outside the box too.
 
 ## What is and is not backed up
+> **Warning: credentials are in the backup by default.** With `BACKUP_SECRETS=1` (the default), credential files
+> on the box - tokens, `~/.ssh`, logins under `~/.config` (e.g. `gh`, rclone), CLI logins, `.env` files, browser
+> cookie stores, Grok Box's own rclone config - are stored **inside the encrypted repository**. Anyone with the
+> restic password and access to the Drive folder can restore them. Set `BACKUP_SECRETS=0` in `config.env` to
+> exclude them ([excludes-secrets.txt](excludes-secrets.txt)). The restic password file itself is never uploaded.
+> Also: with the server-side export, secrets pasted into a chat end up in the exported transcripts
+> (`staging/server-export/`), which are backed up too.
+
 **Backed up**: everything under `BACKUP_ROOTS` (default `/workspace` and `/home/box`) including venvs, `~/.local`, `node_modules`, browser profiles,
 and (with `BACKUP_SECRETS=1`, default) credential files, since the repository is encrypted. `staging/` (SQLite copies, brain export) is always included.
 
@@ -132,9 +180,11 @@ A real restore takes `state/backup.lock` (waits up to `RESTORE_LOCK_WAIT`); `lis
 ## Limits: what a box backup cannot contain
 Data that lives only on the platform's servers or in the app cannot be read from inside the box, so it is **not** backed up:
 - the authoritative server-side copies of routines/automations (the box holds a synced local copy, which is what gets backed up).
-  Every bot's server-side **conversation history and the shared memory ARE backed up** by the two Grok Box bots
+  Every bot's server-side **conversation history IS backed up** by the two Grok Box bots
   (see Architecture) into `staging/server-export/` ([docs/server-export.md](docs/server-export.md)), including the primary
-  bot's main chat and each other's conversations. Still out of reach: subagent runs; the private memory of bots other than
+  bot's main chat and each other's conversations. The shared memory is only **sampled**: GrokBox-Main asks `RecallMemory`
+  about 10 generic queries a day (Assist 3-5) and stores what comes back, so it is not a complete dump of a bot's memory.
+  Still out of reach: subagent runs; the private memory of bots other than
   the two Grok Box bots (`RecallMemory` only sees the caller's own + shared memory; the primary bot dumps its own once at
   setup, so keep durable facts in shared memory; other bots' on-box memory files are in the brain export);
   bots the server does not let them read (listed as `not readable`);
@@ -145,19 +195,27 @@ Data that lives only on the platform's servers or in the app cannot be read from
 
 You must also keep **outside the box**: the restic password, the Google OAuth client JSON, and access to your Google account.
 
+### Voice conversations
+Voice calls run on the platform's servers. As far as we have checked, they show up in the bot's chat transcript,
+so the daily transcript export captures them with up to ~24 h delay (the next daily export). Unknown: whether the
+stored text is verbatim or a summary, and how long the server keeps it. Grok Box does not export audio.
+
 ## Setup in short (a bot does this for you, see AGENTS.md)
-1. `cp config.env.example config.env`; `./install.sh` (pinned restic + rclone, SHA256-verified, no root).
+1. `cp config.env.example config.env` (set `TZ`, decide `BACKUP_SECRETS`); `./install.sh` (pinned restic + rclone, SHA256-verified, no root).
 2. Restic password: box secret `RESTIC_BACKUP_PASSWORD` (or `./install.sh --gen-password`) and your password manager.
 3. Google OAuth client: [docs/google-cloud-setup.md](docs/google-cloud-setup.md) -> `secrets/gdrive-oauth-client.json`; `./auth-gdrive.sh` (one consent click).
    Fallback: `./auth-gdrive.sh --rclone-default-client` (shared, rate-limited client; see [docs/migrate-client.md](docs/migrate-client.md)).
 4. `./install.sh --init`, `./backup.sh --dry-run`, `./backup.sh`, `./install.sh --schedule`, `./status.sh`.
 5. Your bot creates **GrokBox-Main** and **GrokBox-Assist** ([docs/bots.md](docs/bots.md)) and briefs them. Each creates its own daily
    routine for health, memory and mandatory handoff ([Main](docs/routine-main.md), [Assist](docs/routine-assist.md)) and runs the first full export in its normal chat. They report only problems.
+6. First restore drill (`./test-restore.sh`, `./doctor.sh`), an alert channel (`ALERT_HOOK`) and the `EXPECTED_BOTS` roster.
 
 ## Test
 `tests/smoke.sh` runs the whole flow in a temp dir against a local restic repo (no Google Drive needed): install, init, backups, restore with checksum verification,
 stale-guard trip (exit 4) + latch, `--force`, incomplete snapshot (exit 6), status no-success flag, test restore, check, status, scheduler start/stop,
 restic timeouts, lock-age and heartbeat flags, restore host fallback, symlinked SQLite dedupe, and the server-export failure cases.
+The other suites (`tests/ci-install.sh`, `tests/health.sh`, `tests/locks.sh`, `tests/maintenance.sh`) are listed in
+[CONTRIBUTING.md](CONTRIBUTING.md); run `tests/smoke.sh` first, it downloads the binaries they reuse.
 
 ## Runbooks
 See [docs/runbooks.md](docs/runbooks.md) for step-by-step procedures:
@@ -168,7 +226,7 @@ See [docs/runbooks.md](docs/runbooks.md) for step-by-step procedures:
 For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.md](REBUILD.md).
 
 ## CI
-[`ci/github-actions-ci.yml.example`](ci/github-actions-ci.yml.example) is a ready GitHub Actions workflow (copy it to `.github/workflows/ci.yml` to enable it) that runs `shellcheck` on all shell scripts and executes `tests/smoke.sh` plus any additional `tests/*.sh` suites on every push and pull request. `install.sh` verifies downloaded `restic` and `rclone` archives against both the repo-pinned [checksums.txt](checksums.txt) and upstream `SHA256SUMS`.
+[`ci/github-actions-ci.yml.example`](ci/github-actions-ci.yml.example) is a ready GitHub Actions workflow (copy it to `.github/workflows/ci.yml` to enable it) that runs `shellcheck` on all shell scripts, then `tests/smoke.sh` and each other `tests/*.sh` suite in its own step, on every push to `main` and every pull request. `install.sh` verifies downloaded `restic` and `rclone` archives against both the repo-pinned [checksums.txt](checksums.txt) and upstream `SHA256SUMS`.
 
 ## Files
 | file | what |
@@ -199,13 +257,17 @@ For box moves, missing local files, or rebuilding a brand-new box, see [REBUILD.
 | `docs/bots.md` | the two backup bots: why, personas, setup briefs for `CreateAgent` / `SendToAgent` |
 | `docs/routine-main.md` | GrokBox-Main scheduled health/memory prompt + parent chat export loop, with placeholders |
 | `docs/routine-assist.md` | GrokBox-Assist scheduled health/memory prompt + parent chat export of Main/primary, fallback |
-| `docs/server-export.md` | scheduled memory export + parent chat transcript export after handoff |
+| `docs/server-export.md` | scheduled memory export (a sample) + parent chat transcript export after handoff |
 | `docs/migrate-client.md` | move to another OAuth client (new folder + `restic copy`) |
+| `docs/platform-contract.md` | what Grok Box assumes from the Grok Bot platform (tool result formats, paths); running without a Grok Bot |
 | `REBUILD.md` | runbook: box move, missing files, brand-new box |
 | `PRIVACY.md` | privacy policy (also used as the OAuth consent-screen policy URL) |
 | `docs/health-and-alerts.md` | doctor.sh, weekly test restore, alert dedupe + `ALERT_HOOK`, expected bots, Drive report |
 | `tests/smoke.sh` | local end-to-end test |
 | `tests/health.sh` | offline tests for doctor.sh, weekly test restore, alert dedupe/hook, expected bots, Drive report (fake rclone) |
+| `tests/ci-install.sh`, `tests/locks.sh`, `tests/maintenance.sh` | CI file, checksums + docs; lock regressions; maintenance (see [CONTRIBUTING.md](CONTRIBUTING.md)) |
+| `ci/github-actions-ci.yml.example` | GitHub Actions workflow (copy to `.github/workflows/ci.yml`): shellcheck + every test suite |
+| `CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`, `CHANGELOG.md` | how to contribute, report vulnerabilities privately, behave; change history |
 | `secrets/` (chmod 700), `state/`, `logs/`, `staging/`, `cache/`, `bin/` | runtime data, gitignored |
 
 ## License
