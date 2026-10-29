@@ -58,6 +58,8 @@ Backup, forget and retention tag cleanup wait up to `LOCK_RETRY_WAIT` (default `
 per attempt. A lock error triggers one retry; at most one plain `restic unlock`
 (stale locks only) runs across backup, promotion and retention in a script run.
 An unlock before retry raises an alert; daily check's startup unlock uses the same budget.
-An hourly backup that gives up waiting for `backup.lock` exits successfully but alerts
+An hourly backup with `--wait` (as used by the scheduler) that gives up waiting for
+`backup.lock` exits successfully but alerts
 and records time, mode, reason, holder and waited seconds in `state/backup-skipped`.
-Quick skips stay quiet; the next successful hourly backup clears that file.
+Manual runs without `--wait` and quick runs only log a busy-lock skip and exit 0;
+they create no skip record or skip alert. The next successful hourly backup clears that file.
