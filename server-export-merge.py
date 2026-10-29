@@ -15,6 +15,9 @@ routine hands off, GrokBox-Main's chat (GrokBox-Assist for Main's conversation) 
                                                      exit 1 if one is missing or older (did the routine run?)
   server-export-merge.py repair                       merge an id's history split over several files
                                                      (left by a bot rename in older versions); keeps originals
+  server-export-merge.py dedupe [--dry-run] [ID...]    remove adjacent repeated blocks from ids with
+                                                     "matched no lines" warnings; keeps originals;
+                                                     dry-run only reports, JSON stdout / summary stderr
   server-export-merge.py memory [--remove] [--out NAME] [--label WHO] CHUNK...
                                                      merge RecallMemory (write_to_file) results into
                                                      memory/<NAME>.md (default primary-bot-and-shared; deduped, kept forever)
@@ -40,11 +43,12 @@ them, because `|| rc=$?` alone leaves the shell's own status 0: `... || rc=$?; e
               only signal). Refetch that id with a smaller limit (a smaller page often survives what
               truncated the first one) and re-ingest; report it if the retry is rejected too.
   age     1 = an id was never checked or its last check is older than --max-hours.
+  dedupe  1 = at least one id failed; other ids are still processed.
   all     2 = bad usage (unknown subcommand/flags). Anything else is an unexpected error.
 The JSON on stdout of `ingest`/`next` is always valid for the pages that WERE ingested; `{}` means
 "nothing missing" only when the exit code was 0.
 """
-import datetime, json, os, re, sys, time, unicodedata, glob, shutil
+import datetime, json, os, re, sys, time, unicodedata, glob, shutil, tempfile
 
 BASE = os.environ.get('SERVER_EXPORT_DIR',
                       os.path.join(os.path.dirname(os.path.abspath(__file__)), 'staging', 'server-export'))
@@ -185,6 +189,149 @@ def _overlap(old, new):
     return 0
 
 
+def memory_context_text(text):
+    """A context-only part, optionally truncated or followed by known system blocks."""
+    if not text.startswith('<memory_context>'):
+        return False
+    suffix = text.partition('</memory_context>')[2].lstrip()
+    while suffix:
+        block = re.match(r'<(available_subagent_models|teammates)(?:\s[^<>]*)?>', suffix)
+        if not block:
+            # Truncation can replace the teammates opening tag with an elision marker.
+            return re.fullmatch(r'\.\.\.[^<]*</teammates>', suffix.rstrip()) is not None
+        _, closing, suffix = suffix[block.end():].partition(f'</{block[1]}>')
+        if not closing:
+            return True  # The final system block was truncated.
+        suffix = suffix.lstrip()
+    return True
+
+
+def transcript_key(line):
+    """Canonical ordinary line, or None for a server-rebuilt user memory-context message."""
+    try:
+        msg = json.loads(line)
+    except ValueError:
+        return line   # Blank or damaged lines are ordinary and match only their raw text.
+    if isinstance(msg, dict) and msg.get('role') == 'user':
+        body = msg.get('message')
+        parts = body.get('content') if isinstance(body, dict) else None
+        if isinstance(parts, list) and parts and all(
+                isinstance(p, dict) and p.get('type') == 'text' and isinstance(p.get('text'), str)
+                and memory_context_text(p['text']) for p in parts):
+            return None
+    return canon(line)
+
+
+def memory_overlap(old, new):
+    """Fallback only: ignore volatile memory messages, but require an ordinary matching line."""
+    old = old[-(2 * len(new) + 20):]   # bounded window: parsing a whole long transcript per page is wasteful
+    old_keys, new_keys = [transcript_key(l) for l in old], [transcript_key(l) for l in new]
+    co = [key for key in old_keys if key is not None]
+    ordinary = [i for i, key in enumerate(new_keys) if key is not None]
+    cn = [new_keys[i] for i in ordinary]
+    trailing = len(old_keys) - next((i + 1 for i in range(len(old_keys) - 1, -1, -1)
+                                   if old_keys[i] is not None), 0)
+    for k in range(min(len(co), len(cn)), 0, -1):
+        if co[-k:] == cn[:k]:
+            end = ordinary[k - 1] + 1
+            while trailing and end < len(new_keys) and new_keys[end] is None:
+                end += 1; trailing -= 1
+            return end
+    return 0
+
+
+def repeated_blocks(lines):
+    """Remove only the second copy of adjacent ordinary blocks (>=5 lines, >=3 distinct keys).
+
+    Work on prefixes so every repeat is removed as soon as its second copy ends. The
+    resulting prefix is already repeat-free, so one invocation reaches a fixed point. Occurrence
+    lists avoid trying every possible block length on histories of mostly distinct messages.
+    Keep original line numbers for the dry-run report and original bytes for surviving lines.
+    """
+    kept, keys, offsets, occurrences, removed = [], [], [], {}, []
+    trailing = 0
+    for number, line in enumerate(lines, 1):
+        key = transcript_key(line)
+        if key is None and trailing:
+            removed.append(number); trailing -= 1
+            continue
+        kept.append((number, line))
+        if key is None: continue
+        trailing = 0
+        offsets.append(len(kept) - 1); keys.append(key)
+        occurrences.setdefault(key, []).append(len(keys) - 1)
+        end, size = len(keys) - 1, 0
+        for previous in reversed(occurrences[keys[-1]][:-1]):
+            n = end - previous
+            if n < 5: continue
+            if 2 * n > len(keys): break
+            block = keys[-n:]
+            if len(set(block)) >= 3 and keys[-2*n:-n] == block:
+                size = n; break
+        if not size: continue
+        start = offsets[-size]
+        # Only as many trailing volatile lines as separate the two ordinary copies.
+        trailing = start - offsets[-size - 1] - 1
+        removed.extend(number for number, _ in kept[start:])
+        for key in reversed(keys[-size:]): occurrences[key].pop()
+        del keys[-size:]; del offsets[-size:]; del kept[start:]
+    return ''.join(line for _, line in kept), sorted(removed)
+
+
+def dedupe(pos, ids, dry_run=False):
+    """Conservative one-time cleanup of transcripts flagged by failed overlap matching."""
+    summary, failed = {}, False
+    selected = list(dict.fromkeys(ids)) if ids else sorted(
+        tid for tid, rec in pos.items() if any('matched no lines' in w for w in rec.get('warnings', [])))
+    for tid in selected:
+        rec = pos.get(tid, {})
+        result = {'removed_lines': 0, 'line_numbers': [], 'dry_run': dry_run}
+        summary[tid] = result
+        try:
+            if not any('matched no lines' in w for w in rec.get('warnings', [])):
+                result['status'] = 'skipped: no matched no lines warning'
+            else:
+                # Do not call tfile(): it can rename files or repair split history, even in a dry run.
+                files = sorted(glob.glob(os.path.join(TDIR, f'{glob.escape(tid)}__*.jsonl')))
+                if len(files) != 1:
+                    result['status'] = 'skipped: expected one transcript file (check repair)'
+                else:
+                    path = files[0]
+                    with open(path, encoding='utf-8', newline='') as f:
+                        lines = f.readlines()
+                    text, removed = repeated_blocks(lines)
+                    result.update(removed_lines=len(removed), line_numbers=removed,
+                                  status='would remove' if dry_run and removed else 'removed' if removed else 'unchanged')
+                    if removed and not dry_run:
+                        os.makedirs(os.path.join(SDIR, 'replaced'), mode=0o700, exist_ok=True)
+                        keep = tempfile.mkdtemp(prefix=time.strftime('%Y%m%d-%H%M%S-'),
+                                                dir=os.path.join(SDIR, 'replaced'))
+                        # Preserve the original exactly, including whitespace and line endings.
+                        write_atomic(os.path.join(keep, os.path.basename(path)), ''.join(lines))
+                        write_atomic(path, text)
+                        rec['lines'] = len(lines) - len(removed)
+                        rec['bytes'] = os.path.getsize(path)
+                        rec['warnings'] = [w for w in rec['warnings'] if 'matched no lines' not in w]
+                        rec.setdefault('notes', []).append(
+                            f"{time.strftime('%F %T%z')}: dedupe removed {len(removed)} repeated lines; original in {keep}")
+                        result['original'] = keep
+                        save_pos(pos); write_index(pos)
+        except Exception as e:
+            result['status'] = f'error: {e}'
+            failed = True
+        ranges = []
+        for number in result['line_numbers']:
+            if ranges and number == ranges[-1][1] + 1:
+                ranges[-1][1] = number
+            else:
+                ranges.append([number, number])
+        detail = ', '.join(f'lines {first}-{last}' for first, last in ranges)
+        print(f"dedupe {tid}: {result['status']}; {result['removed_lines']} lines"
+              + (f'; {detail}' if detail else ''), file=sys.stderr)
+    print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    return 1 if failed else 0
+
+
 def repair_split(tid, files):
     """Merge several files of one id (left by a rename in older versions) oldest first, dropping the
     overlap between consecutive files. The originals are kept in state/replaced/<time>/."""
@@ -245,8 +392,10 @@ def stitch(pos, tid):
                 tail = []
                 if os.path.exists(path):
                     with open(path, encoding='utf-8') as fh:
-                        tail = [l for l in fh.read().split('\n')[-(len(new) + 5):] if l]
+                        tail = [l for l in fh.read().split('\n') if l]
                 k = _overlap(tail, new)
+                if k == 0:
+                    k = memory_overlap(tail, new)
                 if k == 0:
                     rec.setdefault('warnings', []).append(
                         f"{time.strftime('%F %T%z')}: overlap {a}-{M} matched no lines; appended page whole")
@@ -408,11 +557,21 @@ def memory(paths, remove=False, out_name='primary-bot-and-shared', label='primar
 
 if __name__ == '__main__':
     a = sys.argv[1:]
-    if not a or a[0] not in ('ingest', 'next', 'index', 'memory', 'repair', 'age'):
+    if not a or a[0] not in ('ingest', 'next', 'index', 'memory', 'repair', 'dedupe', 'age'):
         print(__doc__); sys.exit(2)
     import fcntl   # two bots may run this at the same time: one writer at a time
-    os.makedirs(SDIR, mode=0o700, exist_ok=True)
-    _lock = open(os.path.join(SDIR, '.lock'), 'w'); fcntl.flock(_lock, fcntl.LOCK_EX)
+    dry_run = a[0] == 'dedupe' and '--dry-run' in a
+    if a[0] == 'dedupe' and any(x.startswith('-') and x != '--dry-run' for x in a[1:]):
+        print(__doc__); sys.exit(2)
+    if not dry_run: os.makedirs(SDIR, mode=0o700, exist_ok=True)
+    # A dry run never creates/truncates the lock or any directory. Normal exports already have it.
+    try:
+        _lock = open(os.path.join(SDIR, '.lock'), 'r' if dry_run else 'a')
+    except FileNotFoundError:
+        if os.path.exists(POSF):
+            print('dedupe: missing state/.lock; run index first', file=sys.stderr); sys.exit(1)
+        dedupe({}, [x for x in a[1:] if x != '--dry-run'], True); sys.exit(0)
+    fcntl.flock(_lock, fcntl.LOCK_EX)
     if a[0] == 'ingest':
         rm = '--remove' in a; a = [x for x in a[1:] if x != '--remove']
         fid = None
@@ -428,6 +587,8 @@ if __name__ == '__main__':
         memory(a, rm, **kw)
     elif a[0] == 'repair':
         pos = load_pos(); repair(pos); refresh_deleted(pos); save_pos(pos); write_index(pos)
+    elif a[0] == 'dedupe':
+        sys.exit(dedupe(load_pos(), [x for x in a[1:] if x != '--dry-run'], dry_run))
     elif a[0] == 'age':
         a = a[1:]; mh = 26.0
         if '--max-hours' in a:

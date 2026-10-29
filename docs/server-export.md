@@ -18,7 +18,7 @@ The tool result formats and platform paths it relies on are listed in [platform-
 | `state/pending/<id>/<A>-<B>.jsonl` | pages not yet contiguous with what is exported |
 | `INDEX.md` | name, id, counts, last export, status (`complete`, `empty`, `not readable`, `gap`) |
 | `memory/<name>.md` | deduplicated RecallMemory facts per bot, a **sample** (see "Memory export is a sample") (`grokbox-main-and-shared`, `grokbox-assist-and-shared`, `primary-bot-private`); only grows |
-| `state/replaced/` | originals kept by `repair` (history of a renamed bot that older versions split into two files) |
+| `state/replaced/` | originals kept by `repair` (renamed-bot split files) and `dedupe` (adjacent repeated blocks) |
 
 Set `SERVER_EXPORT_DIR` to write elsewhere and `AGENTS_DIR` if the agents live somewhere other than
 `/home/box/agent-data/agents` (used only to look up display names).
@@ -82,6 +82,50 @@ Doctor warns about an empty roster once active exports exist; `EXPECTED_BOTS_REQ
 
 A bot that is renamed keeps one file: the transcript file is renamed to the new slug. `repair` merges files
 that older versions split; it keeps the originals in `state/replaced/`.
+
+## One-time cleanup of repeated transcript lines
+
+Older versions could append an overlapping page whole when a user message started with
+`<memory_context>`. The server rebuilds or omits that message on each fetch, so exact matching failed and
+stored a persistent `overlap … matched no lines; appended page whole` warning. Incremental exports
+now try exact matching first, then ignore volatile `memory_context` lines when comparing, requiring
+an ordinary matching line. A refreshed duplicate of a trailing volatile line can be dropped; a new
+volatile line after a match ending in an ordinary line is kept. A memory-context-only match is
+never sufficient for that fallback. Only user messages consisting entirely of text parts that
+each start with `<memory_context>` are volatile, and each part must either have no closing
+`</memory_context>` (truncated), or have only whitespace and zero or more system blocks after
+its first closing tag. Each block must be `<NAME ...>...</NAME>`, with NAME exactly
+`available_subagent_models` or `teammates`, and ends at its first matching closing tag.
+An unclosed final block consumes the rest of the part. After these blocks, an elided suffix
+starting with `...` and ending (ignoring trailing whitespace) with `</teammates>` is also
+allowed if it contains no other `<` characters. Otherwise, only whitespace may occur outside
+these blocks; any other text (such as a user question after a closed block) or an unknown
+block name makes the whole message ordinary, as do mixed parts. These messages are compared
+exactly as canonical JSON.
+
+Always run `dedupe --dry-run` first and check the reported line ranges against the warning's
+time/position before applying cleanup. A genuine exact repeat anywhere in a flagged transcript
+can also be removed. To review and clean up existing damage, run from the repository:
+
+```bash
+python3 server-export-merge.py dedupe --dry-run       # reports only; writes nothing
+python3 server-export-merge.py dedupe                # or dedupe ID... to select transcripts
+```
+
+Only ids with a `matched no lines` warning are eligible. Cleanup removes the **second** copy of
+an immediately repeated block of at least five ordinary lines with at least three distinct lines,
+ignoring volatile `memory_context` lines when comparing. It removes the span from the second copy's
+first to last ordinary line, including volatile lines inside it. Directly following volatile lines
+are dropped only up to the number between the two copies, so a refreshed duplicate can be dropped.
+All other lines and their order remain intact. Originals
+are retained in `staging/server-export/state/replaced/<timestamp>/`. Only when lines were removed
+does it clear that id's `matched no lines` warnings, update line/byte counts, add a note, and refresh
+`INDEX.md`; unrelated warnings remain. Short, low-diversity or nonadjacent repeats are left for review.
+Repeated runs make no further changes. Both modes print one summary line per selected id to stderr
+and JSON to stdout, including the original one-based line numbers removed (or proposed for removal).
+Blank and non-JSON lines match only their raw text. Each changed id saves `positions.json` and
+`INDEX.md` immediately. A failing id is reported on stderr and with `status: "error: ..."` in JSON;
+other ids are still processed, and the command exits 1 if any id failed.
 
 ## Memory export is a sample
 The memory export is **not** a complete dump of a bot's memory. Each run asks `RecallMemory` a fixed

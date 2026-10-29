@@ -7,6 +7,9 @@ is the only supported version.
 ## [Unreleased]
 
 ### Added
+- `server-export-merge.py dedupe [--dry-run] [ID...]` cleans adjacent repeated transcript blocks
+  for ids with failed-overlap warnings, ignoring volatile memory-context lines when comparing,
+  preserving originals and updating export counts and warnings.
 - Community files: `CONTRIBUTING.md`, `SECURITY.md` (private reporting through GitHub security
   advisories), `CODE_OF_CONDUCT.md`, this changelog.
 - GitHub issue forms (bug report with redaction checklist, feature request), issue template config
@@ -33,6 +36,8 @@ is the only supported version.
   scheduled prompt. The handoff line is unchanged. `tests/ci-install.sh` checks the numbering.
 
 ### Fixed
+- Incremental transcript overlap matching ignores volatile user `<memory_context>` lines on both
+  sides after exact matching fails, requiring an ordinary matching line and preserving new context.
 - Docs no longer say the shared memory is "backed up" without a caveat: the memory export is a
   sample from a fixed set of RecallMemory queries, not a complete dump.
 - REBUILD.md no longer refers to a "daily watchdog routine"; it points to the GrokBox-Main and

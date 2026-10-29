@@ -172,6 +172,356 @@ check "...overlap fragment removed, no duplicates" test "$(texts bot-t4)" = "m0 
 check "...every overlap recovery line is valid JSON" python3 -c 'import json,sys;[json.loads(l) for l in open(sys.argv[1])]' "$(tfile bot-t4)"
 check "...overlap recovery leaves no .tmp files" test -z "$(find "$SE" -name '*.tmp')"
 
+# Volatile per-turn memory context at an incremental page boundary. All data is synthetic.
+run_ok "memory-context overlap: shapes A/B, new volatile line, exact-first and mismatch guards" python3 - "$REPO_DIR/server-export-merge.py" "$TMP" <<'PYOVERLAP'
+import importlib.util, json, os, subprocess, sys
+from pathlib import Path
+script, tmp = sys.argv[1], Path(sys.argv[2])
+base = tmp / 'memory-overlap'
+env = dict(os.environ, SERVER_EXPORT_DIR=str(base), AGENTS_DIR=str(tmp / 'no-agents'),
+           DELETED_BOTS_FILE='')
+def run(*args):
+    return json.loads(subprocess.check_output([sys.executable, script, *args], env=env, text=True))
+def message(text, role='user'):
+    return json.dumps({'role': role, 'message': {'content': [
+        {'type': 'text', 'text': text}]}}, ensure_ascii=False)
+def ingest(a, b, lines):
+    chunk = tmp / 'overlap-page.txt'
+    chunk.write_text(f'Transcript of agent "m0" (fixture-0), positions {a}-{b} of {b+1}:\n'
+                     + '\n'.join(lines) + '\n')
+    assert run('ingest', str(chunk)) == {}
+ordinary = [message(f'm{i}') for i in range(5)]
+mc, changed = message('<memory_context>m0'), message('<memory_context>m1')
+x, y = [message(f'm{i}') for i in range(18)], [message(f'm{i}') for i in range(18, 22)]
+failures = []
+for label, old, page, expected in [
+        ('shape-b', x + [mc] + y, x + y + [message('m22')], x + [mc] + y + [message('m22')]),
+        ('new-volatile', x + [mc] + y, x + y + [changed, message('m22')],
+         x + [mc] + y + [changed, message('m22')]),
+        ('many-volatile', x + [mc] * 10 + y, x + y + [message('m22')],
+         x + [mc] * 10 + y + [message('m22')])]:
+    base = tmp / label
+    env['SERVER_EXPORT_DIR'] = str(base)
+    ingest(0, 22, old)
+    ingest(0, 23, page)
+    file, = (base / 'transcripts').glob('*.jsonl')
+    rec = json.loads((base / 'state/positions.json').read_text())['fixture-0']
+    if (file.read_text().splitlines() != expected or rec.get('warnings')
+            or rec['lines'] != len(expected) or rec['bytes'] != file.stat().st_size):
+        failures.append(label)
+assert not failures, failures
+base = tmp / 'memory-overlap'
+env['SERVER_EXPORT_DIR'] = str(base)
+ingest(0, 5, ordinary + [mc])
+ingest(2, 7, ordinary[2:] + [changed, message('m6'), message('m7')])
+file, = (base / 'transcripts').glob('*.jsonl')
+assert file.read_text().splitlines() == ordinary + [mc, message('m6'), message('m7')]
+rec = json.loads((base / 'state/positions.json').read_text())['fixture-0']
+assert not rec.get('warnings') and rec['lines'] == 8 and rec['bytes'] == file.stat().st_size
+assert run('next') == {}
+# An exact short overlap wins even when a longer tolerant overlap could match.
+ingest(8, 8, [mc])
+ingest(7, 10, [mc, message('m7'), changed, message('m10')])
+assert file.read_text().splitlines()[-4:] == [mc, message('m7'), changed, message('m10')]
+# Only volatile lines matching must never swallow the new version.
+ingest(11, 11, [mc])
+ingest(11, 13, [changed, message('m12'), message('m13')])
+assert file.read_text().splitlines()[-4:] == [mc, changed, message('m12'), message('m13')]
+assert 'matched no lines' in json.loads((base / 'state/positions.json').read_text())['fixture-0']['warnings'][0]
+# Verify ordinary mismatches, assistant context, and a non-prefix marker remain exact-only.
+spec = importlib.util.spec_from_file_location('merger', script)
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+for old, new in [(message('m0'), message('m1')),
+                 (message('<memory_context>m0', 'assistant'), message('<memory_context>m1', 'assistant')),
+                 (message('m0<memory_context>m0'), message('m0<memory_context>m1'))]:
+    assert mod.memory_overlap([message('m99'), old], [message('m99'), new]) == 0
+assert mod.memory_overlap([mc, mc], [changed, changed]) == 0
+assert mod.memory_overlap(ordinary + [mc, mc], ordinary + [changed] * 3) == 7
+assert mod.memory_overlap([mc] + ordinary, [changed] + ordinary + [changed]) == 6
+assert mod.memory_overlap(ordinary, [changed] + ordinary + [changed]) == 6
+assert mod._overlap([mc], [mc]) == 1
+PYOVERLAP
+
+run_ok "mixed memory context: old tail, new page middle, and after a duplicate block" python3 - "$REPO_DIR/server-export-merge.py" "$TMP" <<'PYMIXED'
+import importlib.util, json, os, subprocess, sys
+from pathlib import Path
+script, tmp = sys.argv[1], Path(sys.argv[2])
+spec = importlib.util.spec_from_file_location('merger', script)
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+def message(*parts):
+    return json.dumps({'role': 'user', 'message': {'content': [
+        {'type': 'text', 'text': text} for text in parts]}})
+a = [message(f'm{i}') for i in range(5)]
+mc = message('<memory_context>old')
+mixed = message('<memory_context>new', 'real user text')
+for parts in [[], [{'type': 'image', 'text': '<memory_context>image'}],
+              [{'text': '<memory_context>missing type'}],
+              [{'type': 'text', 'text': '<memory_context>new'}, {'type': 'image'}]]:
+    line = json.dumps({'role': 'user', 'message': {'content': parts}})
+    assert mod.transcript_key(line) == mod.canon(line)
+assert mod.transcript_key(mixed) == mod.canon(mixed)
+assert mod.transcript_key(message('<memory_context>a', '<memory_context>b')) is None
+# Closed context may include known system blocks; truncation is also volatile.
+models = '<available_subagent_models>synthetic</available_subagent_models>'
+teammates = '<teammates name="synthetic">fixture</teammates>'
+elided = '...\n- synthetic teammate\n</teammates>'
+models_attrs = '<available_subagent_models version="synthetic">fixture</available_subagent_models>'
+for tail in ['', '</memory_context>', '</memory_context> \n\t',
+             *('</memory_context> \n' + blocks for blocks in [
+                 models, models + '\n\t' + teammates, teammates,
+                 models_attrs + '\n' + elided, models_attrs + '\n' + elided + ' \n\t',
+                 '<available_subagent_models version="synthetic">truncated',
+                 models + '\n<teammates>truncated'])]:
+    old, new = message('<memory_context>old' + tail), message('<memory_context>new' + tail)
+    assert mod.transcript_key(old) is None
+    assert mod.transcript_key(new) is None
+    assert mod.memory_overlap(a + [old], a + [new, message('new')]) == 6  # shape A
+    assert mod.memory_overlap(a[:2] + [old] + a[2:], a + [message('new')]) == 5  # shape B
+    for lines, expected in [(a + [old] + a + [new], a + [old]),
+                            (a[:2] + [old] + a[2:] + a, a[:2] + [old] + a[2:])]:
+        text, removed = mod.repeated_blocks([line + '\n' for line in lines])
+        assert text == '\n'.join(expected) + '\n'
+        assert len(removed) == len(lines) - len(expected)
+cases = [('multipart', message('<memory_context>old', 'earlier user text'), mixed)]
+for i, tail in enumerate(['Question?', ' \nQuestion?',
+                          'Question?</memory_context><available_subagent_models>synthetic',
+                          models + 'Question?', models + '\n' + teammates + '\nQuestion?',
+                          '<unknown>synthetic</unknown>',
+                          '<available_subagent_models_extra>synthetic',
+                          models + '\nQuestion?\n' + teammates,
+                          models + '\n<unknown>synthetic</unknown>',
+                          *(models_attrs + '\n' + suffix for suffix in [
+                              'Question?', elided[3:], '...\n- synthetic teammate',
+                              '...<unknown>fixture</unknown></teammates>',
+                              '...fixture < literal</teammates>',
+                              elided + '\nQuestion?', elided + '\n' + teammates])]):
+    cases.append((f'single-{i}', message('<memory_context>old</memory_context>' + tail),
+                  message('<memory_context>new</memory_context>' + tail)))
+for kind, earlier, mixed in cases:
+    assert mod.transcript_key(earlier) == mod.canon(earlier)
+    assert mod.transcript_key(mixed) == mod.canon(mixed)
+    assert mod.transcript_key(message('<memory_context>only',
+                                      json.loads(mixed)['message']['content'][-1]['text'])) is not None
+    assert mod.memory_overlap([mixed], [mixed]) == 1  # Ordinary content still matches exactly.
+    for label, old, new in [('old-tail', a + [earlier], a + [mixed, message('new')]),
+                            ('new-middle', a + [mc], a[:2] + [mixed] + a[2:] + [message('new')])]:
+        assert mod.memory_overlap(old, new) == 0, (kind, label)
+        base = tmp / f'mixed-{kind}-{label}'
+        env = dict(os.environ, SERVER_EXPORT_DIR=str(base), AGENTS_DIR=str(tmp / 'no-agents'),
+                   DELETED_BOTS_FILE='')
+        for end, lines in [(5, old), (6, new)]:
+            chunk = tmp / 'mixed-page.txt'
+            chunk.write_text(f'Transcript of agent "m0" (fixture-0), positions 0-{end} of {end+1}:\n'
+                             + '\n'.join(lines) + '\n')
+            subprocess.run([sys.executable, script, 'ingest', str(chunk)], env=env,
+                           capture_output=True, text=True, check=True)
+        file, = (base / 'transcripts').glob('*.jsonl')
+        assert file.read_text().splitlines() == old + new, (kind, label)
+        assert mixed in file.read_text().splitlines(), (kind, label)
+    assert mod.memory_overlap(a + [mc], a + [mixed]) == len(a)
+    lines = [line + '\n' for line in a[:2] + [mixed] + a[2:] + a]
+    assert mod.repeated_blocks(lines) == (''.join(lines), [])
+    lines = [line + '\n' for line in a + [mc] + a + [mixed]]
+    text, removed = mod.repeated_blocks(lines)
+    assert text == '\n'.join(a + [mc, mixed]) + '\n'
+    assert removed == list(range(7, 12))
+PYMIXED
+
+run_ok "dedupe: dry-run, conservative repeats, originals, atomic modes, idempotence and later ingest" python3 - "$REPO_DIR/server-export-merge.py" "$TMP" <<'PYDEDUPE'
+import json, os, subprocess, sys
+from pathlib import Path
+script, tmp = sys.argv[1], Path(sys.argv[2])
+base = tmp / 'dedupe-export'
+state, transcripts = base / 'state', base / 'transcripts'
+state.mkdir(parents=True); transcripts.mkdir()
+(state / '.lock').touch()
+env = dict(os.environ, SERVER_EXPORT_DIR=str(base), AGENTS_DIR=str(tmp / 'no-agents'),
+           DELETED_BOTS_FILE='')
+def run(*args):
+    result = subprocess.run([sys.executable, script, *args], env=env, text=True, capture_output=True)
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout) if args[0] != 'index' else None
+    if args[0] == 'dedupe':
+        assert len(result.stderr.splitlines()) == len(data)
+        assert all(line.startswith('dedupe fixture-') for line in result.stderr.splitlines())
+        for tid, rec in data.items():
+            numbers = rec['line_numbers']
+            starts = [n for n in numbers if n - 1 not in numbers]
+            ends = [n for n in numbers if n + 1 not in numbers]
+            detail = ', '.join(f'lines {a}-{b}' for a, b in zip(starts, ends))
+            row = next(line for line in result.stderr.splitlines() if line.startswith(f'dedupe {tid}:'))
+            if numbers:
+                assert row.endswith('; ' + detail), row
+    return data
+def message(text):
+    return json.dumps({'role': 'user', 'message': {'content': [{'type': 'text', 'text': text}]}},
+                      ensure_ascii=False) + '\n'
+def positions():
+    return json.loads((state / 'positions.json').read_text())
+def snapshot():
+    # Include names, content, modes and mtimes: a dry run must not rewrite even identical bytes.
+    return {str(f.relative_to(base)): (f.read_bytes() if f.is_file() else None,
+                                      f.stat().st_mode, f.stat().st_mtime_ns)
+            for f in base.rglob('*')}
+warning = 'overlap 0-5 matched no lines; appended page whole'
+a = [message(f'm{i}') for i in range(5)]
+mc, mc2 = message('<memory_context>m0'), message('<memory_context>m1')
+prefix, suffix = [message('m8')], [message('m9'), message('m10')]
+damaged = prefix + a + [mc] + a + [mc2] + suffix
+expected = prefix + a + [mc] + suffix
+x, y = [message(f'm{i}') for i in range(18)], [message(f'm{i}') for i in range(18, 22)]
+shape_b = x + [mc] + y
+fixtures = {
+    'fixture-0': (damaged, [warning]),
+    'fixture-1': ((a[:3] * 2), [warning]),  # less than five lines in the repeated block
+    'fixture-2': ([message('m0'), message('m1')] * 6, [warning]),  # only two distinct lines
+    'fixture-3': (damaged, []),  # no warning: never eligible, even when explicitly requested
+    'fixture-4': (damaged, [warning, 'm0 warning']),
+    'fixture-5': (a + [mc] + [message('m20')] + a + [mc2], [warning]),  # not adjacent
+    'fixture-6': (a + [mc] + a + [mc2] + a + [mc2], [warning]),  # three consecutive copies
+    'fixture-7': (shape_b + x + y + suffix, [warning]),  # volatile line absent from second copy
+    'fixture-8': (shape_b + x + y + [mc2] + suffix, [warning]),  # genuinely new volatile line
+    'fixture-9': (a[:4] + [mc] + a[:4] + [mc2], [warning]),  # only four ordinary lines
+    'fixture-10': (a + [mc, mc] + a[:2] + [mc2] + a[2:] + [mc2] * 3, [warning]),
+    'fixture-11': (shape_b + x + y + x + y + suffix, [warning]),  # shape B triple
+    'fixture-12': (a + [mc] + a + ['\n', 'not JSON\n'], [warning]),  # raw lines after a repeat
+    'fixture-13': ((a[:2] + ['\n', 'not JSON\n'] + a[2:]) * 2, [warning]),  # exact raw repeat
+    'fixture-14': (a + [mc] + a[:2] + ['\n', 'not JSON\n'] + a[2:], [warning]),  # raw mismatch
+    'fixture-15': (damaged + [message('separator')] + damaged, [warning]),  # disjoint ranges
+}
+pos = {}
+for tid, (lines, warnings) in fixtures.items():
+    file = transcripts / f'{tid}__m0.jsonl'
+    file.write_text(''.join(lines))
+    pos[tid] = dict(name='m0', total=8, max_pos=7, lines=len(lines), bytes=file.stat().st_size,
+                    warnings=warnings, notes=['m0'], pending=[])
+(state / 'positions.json').write_text(json.dumps(pos))
+run('index')
+before = snapshot()
+preview = run('dedupe', '--dry-run')
+assert snapshot() == before
+assert preview['fixture-0']['removed_lines'] == 6
+assert preview['fixture-0']['line_numbers'] == list(range(8, 14))
+assert preview['fixture-7']['line_numbers'] == list(range(24, 46))
+assert 'fixture-3' not in preview
+first = run('dedupe', 'fixture-0', 'fixture-3')
+assert first['fixture-0']['removed_lines'] == 6 and first['fixture-3']['removed_lines'] == 0
+assert (transcripts / 'fixture-4__m0.jsonl').read_text() == ''.join(damaged)  # selection respected
+assert (transcripts / 'fixture-0__m0.jsonl').read_text() == ''.join(expected)
+assert positions()['fixture-0']['warnings'] == []
+second = snapshot()
+assert run('dedupe', 'fixture-0')['fixture-0']['removed_lines'] == 0
+assert snapshot() == second  # includes positions, notes, index, originals and mtimes
+result = run('dedupe')
+assert result['fixture-4']['removed_lines'] == 6
+assert result['fixture-6']['removed_lines'] == 12
+for tid, want, removed in [('fixture-7', shape_b + suffix, 22),
+                           ('fixture-8', shape_b + [mc2] + suffix, 22),
+                           ('fixture-10', a + [mc, mc, mc2], 8),
+                           ('fixture-11', shape_b + suffix, 44),
+                           ('fixture-12', a + [mc, '\n', 'not JSON\n'], 5),
+                           ('fixture-13', a[:2] + ['\n', 'not JSON\n'] + a[2:], 7),
+                           ('fixture-15', expected + [message('separator')] + expected, 12)]:
+    assert result[tid]['removed_lines'] == removed
+    assert (transcripts / f'{tid}__m0.jsonl').read_text() == ''.join(want)
+for tid in ['fixture-1', 'fixture-2', 'fixture-3', 'fixture-5', 'fixture-9', 'fixture-14']:
+    assert (transcripts / f'{tid}__m0.jsonl').read_text() == ''.join(fixtures[tid][0])
+    assert positions()[tid] == pos[tid]
+assert positions()['fixture-4']['warnings'] == ['m0 warning']
+assert (transcripts / 'fixture-6__m0.jsonl').read_text() == ''.join(a + [mc])
+for tid in ['fixture-0', 'fixture-4', 'fixture-6', 'fixture-7', 'fixture-8', 'fixture-10', 'fixture-11',
+            'fixture-12', 'fixture-13', 'fixture-15']:
+    file = transcripts / f'{tid}__m0.jsonl'
+    rec = positions()[tid]
+    assert rec['lines'] == len(file.read_text().splitlines()) and rec['bytes'] == file.stat().st_size
+    assert len(rec['notes']) == 2 and 'dedupe' in rec['notes'][-1]
+    original, = (state / 'replaced').glob(f'*/{file.name}')
+    assert original.read_bytes() == ''.join(fixtures[tid][0]).encode()
+    assert original.stat().st_mode & 0o777 == 0o600
+    assert original.parent.stat().st_mode & 0o777 == 0o700
+    assert file.stat().st_mode & 0o777 == 0o600
+assert (state / 'positions.json').stat().st_mode & 0o777 == 0o600
+assert (base / 'INDEX.md').stat().st_mode & 0o777 == 0o600
+assert '| 9 |' in next(l for l in (base / 'INDEX.md').read_text().splitlines() if '`fixture-0`' in l)
+assert 'warning' not in next(l for l in (base / 'INDEX.md').read_text().splitlines() if '`fixture-0`' in l)
+assert not list(base.rglob('*.tmp'))
+before = snapshot()
+run('dedupe'); run('dedupe', '--dry-run')
+assert snapshot() == before
+# Exact continuation uses rec['bytes']; a stale value would trigger an incorrect rewrite/truncate.
+chunk = tmp / 'dedupe-page.txt'
+for tid, old in [('fixture-0', expected), ('fixture-7', shape_b + suffix)]:
+    chunk.write_text(f'Transcript of agent "m0" ({tid}), positions 8-9 of 10:\n'
+                     + message('m11') + message('m12'))
+    file = transcripts / f'{tid}__m0.jsonl'
+    inode = file.stat().st_ino
+    run('ingest', str(chunk))
+    assert file.read_text() == ''.join(old) + message('m11') + message('m12')
+    assert file.stat().st_ino == inode
+    assert positions()[tid]['bytes'] == file.stat().st_size
+    assert positions()[tid]['lines'] == len(old) + 2
+    assert not positions()[tid]['warnings'] and run('next') == {}
+PYDEDUPE
+
+run_ok "dedupe: per-id errors, immediate metadata saves, continued repairs and exit 1" python3 - "$REPO_DIR/server-export-merge.py" "$TMP" <<'PYERRORS'
+import contextlib, importlib.util, io, json, os, subprocess, sys
+from pathlib import Path
+script, tmp = sys.argv[1], Path(sys.argv[2])
+base = tmp / 'dedupe-errors'
+state, transcripts = base / 'state', base / 'transcripts'
+state.mkdir(parents=True); transcripts.mkdir()
+(state / '.lock').touch()
+env = dict(os.environ, SERVER_EXPORT_DIR=str(base), AGENTS_DIR=str(tmp / 'no-agents'),
+           DELETED_BOTS_FILE='')
+block = ''.join(json.dumps({'text': f'm{i}'}) + '\n' for i in range(5))
+pos = {}
+for tid in ['fixture-0', 'fixture-1', 'fixture-2']:
+    path = transcripts / f'{tid}__m0.jsonl'
+    if tid == 'fixture-1':
+        path.mkdir()  # Deterministic read failure, even when tests run as root.
+    else:
+        path.write_text(block * 2)
+    pos[tid] = dict(name='m0', total=5, max_pos=4, lines=10, bytes=len(block) * 2,
+                    warnings=['overlap 0-4 matched no lines; appended page whole'])
+(state / 'positions.json').write_text(json.dumps(pos))
+def run(*args):
+    return subprocess.run([sys.executable, script, *args], env=env, capture_output=True, text=True)
+assert run('index').returncode == 0
+for args in [('dedupe', '--dry-run'), ('dedupe',)]:
+    result = run(*args)
+    assert result.returncode == 1, result.stderr
+    summary = json.loads(result.stdout)
+    assert summary['fixture-1']['status'].startswith('error: ')
+    assert 'dedupe fixture-1: error: ' in result.stderr
+    assert len(result.stderr.splitlines()) == 3
+    for tid in ['fixture-0', 'fixture-2']:
+        assert summary[tid]['removed_lines'] == 5
+        assert summary[tid]['status'] == ('would remove' if '--dry-run' in args else 'removed')
+        file = transcripts / f'{tid}__m0.jsonl'
+        rec = json.loads((state / 'positions.json').read_text())[tid]
+        assert file.read_text() == (block * 2 if '--dry-run' in args else block)
+        assert rec['bytes'] == file.stat().st_size and rec['lines'] == len(file.read_text().splitlines())
+        row = next(l for l in (base / 'INDEX.md').read_text().splitlines() if f'`{tid}`' in l)
+        assert ('| 10 |' if '--dry-run' in args else '| 5 |') in row
+    assert json.loads((state / 'positions.json').read_text())['fixture-1'] == pos['fixture-1']
+# Observe on-disk metadata as the next id starts, before its read failure is handled.
+spec = importlib.util.spec_from_file_location('merger', script)
+mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)
+mod.SDIR, mod.TDIR, mod.POSF, mod.BASE = str(state), str(transcripts), str(state / 'positions.json'), str(base)
+(transcripts / 'fixture-0__m0.jsonl').write_text(block * 2)
+(state / 'positions.json').write_text(json.dumps(pos))
+def observed_open(path, *args, **kwargs):
+    if str(path).endswith('fixture-1__m0.jsonl'):
+        assert json.loads((state / 'positions.json').read_text())['fixture-0']['lines'] == 5
+        row = next(l for l in (base / 'INDEX.md').read_text().splitlines() if '`fixture-0`' in l)
+        assert '| 5 |' in row
+    return open(path, *args, **kwargs)
+mod.open = observed_open
+with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+    assert mod.dedupe(pos, ['fixture-0', 'fixture-1']) == 1
+assert 'Is a directory' in json.loads(out.getvalue())['fixture-1']['status']
+PYERRORS
+
 # Independent deleted fixtures: exercise the CLI without any real agent data.
 run_ok "deleted merger: flags, labels, statuses, parsing, next, revival and unchanged transcript bytes" python3 - "$REPO_DIR/server-export-merge.py" "$TMP" <<'PYDELETED'
 import json, os, subprocess, sys
