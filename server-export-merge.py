@@ -58,7 +58,6 @@ PEND, POSF = os.path.join(SDIR, 'pending'), os.path.join(SDIR, 'positions.json')
 HDR = re.compile(r'Transcript of (?:agent|conversation)?\s*"?(?P<name>.*?)"?\s*\((?P<id>[^)]+)\),\s*positions\s+'
                  r'(?P<a>\d+)\s*[–-]\s*(?P<b>\d+)\s+of\s+(?P<n>\d+)')
 HDR2 = re.compile(r'positions\s+(?P<a>\d+)\s*[–-]\s*(?P<b>\d+)\s+of\s+(?P<n>\d+)')
-OLDER = re.compile(r'before=(\d+)')
 
 os.umask(0o077)
 
