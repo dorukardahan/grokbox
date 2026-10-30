@@ -152,12 +152,17 @@ The scheduled run collects the open problems into `alert-current.tsv` in the sta
 a key, a tab, and the text. An alert's key is its full `state/ALERT` line, which carries a timestamp.
 A doctor problem's key is its check name, such as `scheduler`, so a changing detail does not repeat it.
 The doctor row `alerts` is skipped, because the alert lines already cover it.
-`alert-reported` in the same directory lists the keys already handed to the parent chat. The scheduled run drops
-keys that are no longer open, so a problem that comes back is reported again. It adds each new key
-when it prints the problem, so two overlapping handoffs can never hide a problem from each other.
-A `flock` on `alert-check.lock` there makes two overlapping collections run one after the other.
-The cost is that a handoff the parent chat never acts on is not repeated by this routine. The daily
-routine still lists every open alert, so the owner hears about it within a day.
+`alert-reported` in the same directory lists the keys the parent chat has confirmed to the owner. The scheduled run
+drops keys that are no longer open, so a problem that comes back is reported again. It never adds a key
+itself: a problem counts as reported only after the owner was really told.
+Each run that finds new problems writes them to its own batch file, `alert-pending/<batch>.tsv`, and prints
+the batch id. The parent chat records exactly that batch after it sent its message
+(see [Alert check parent chat](#alert-check-parent-chat)). The batch file is never changed after it is written,
+so two overlapping runs cannot hide a problem from each other or record each other's problems.
+A batch the parent chat has not confirmed holds its problems back for 90 minutes, so the next hourly run does not
+tell the owner the same thing twice. After that the problems are printed again in a new batch, so a handoff the
+parent chat dropped is repeated until it is confirmed. A `flock` on `alert-check.lock` makes collecting and
+recording run one after the other.
 
 ### Alert check scheduled run
 ```text
@@ -184,16 +189,22 @@ grep -q '^Overall:' "$S/alert-doctor.out" || { echo "CHECK FAILED: doctor.sh pri
 touch "$S/alert-reported"
 awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' "$S/alert-current.tsv" "$S/alert-reported" > "$S/alert-reported.new"
 mv "$S/alert-reported.new" "$S/alert-reported"
-awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' "$S/alert-reported" "$S/alert-current.tsv" > "$S/alert-new.tsv"
-cut -f1 "$S/alert-new.tsv" >> "$S/alert-reported"
+mkdir -p "$S/alert-pending"
+find "$S/alert-pending" -name '*.tsv' -mmin +1440 -delete
+find "$S/alert-pending" -name '*.tsv' -mmin -90 -exec cut -f1 {} + > "$S/alert-pending.keys"
+cat "$S/alert-reported" "$S/alert-pending.keys" > "$S/alert-hold.txt"
+awk -F'\t' 'FILENAME==ARGV[1] {seen[$0]=1; next} !($1 in seen)' "$S/alert-hold.txt" "$S/alert-current.tsv" > "$S/alert-new.tsv"
+B=$(date +%Y%m%dT%H%M%S)-$$
+[ ! -s "$S/alert-new.tsv" ] || { cp "$S/alert-new.tsv" "$S/alert-pending/$B.tmp" && mv "$S/alert-pending/$B.tmp" "$S/alert-pending/$B.tsv"; }
 echo "--- new problems:"
 cut -f2 "$S/alert-new.tsv"
+[ ! -s "$S/alert-new.tsv" ] || echo "--- batch: $B"
 )
 2. If any output line starts with "CHECK FAILED:", go to step 4. If nothing is printed after "--- new problems:", the first line of your result is exactly:
 ALERT CHECK: nothing new
 3. Otherwise the first line is exactly:
 ALERT CHECK: NEW PROBLEMS, parent: tell the owner now
-Then the printed problem lines, unchanged.
+Then the printed problem lines and the `--- batch:` line, unchanged.
 4. If step 1 fails or prints a "CHECK FAILED:" line, the first line is exactly:
 ALERT CHECK: FAILED
 Then the printed error text (at most 300 bytes). No logs, no message content, no secrets.
@@ -205,8 +216,28 @@ On each handoff, follow the line that matches the first line of the result:
 - `ALERT CHECK: nothing new`. Do nothing. Do not message the owner.
 - `ALERT CHECK: NEW PROBLEMS, parent: tell the owner now`. Send the owner one short message in
   `<LANGUAGE>` and plain words: what is wrong, the likely cause, and the next step. Use the cause and
-  next-step list in step A3 above. Do not paste logs. The scheduled run has already recorded these
-  problems, so you run no command.
+  next-step list in step A3 above. Do not paste logs. The scheduled run has not recorded these problems yet.
+  Only after the message was really sent, run exactly this once, with `<BATCH>` replaced by the id on the
+  `--- batch:` line of the result:
+  ```text
+  cd <REPO> || exit 1
+  (
+  set -eE
+  trap 'echo "RECORD FAILED: a command failed at line $LINENO"' ERR
+  B=<BATCH>
+  case "$B" in ""|*[!0-9T-]*) echo "RECORD FAILED: bad batch id"; exit 1;; esac
+  S=$(bash -c '. ./lib.sh >/dev/null && printf %s "$GB_STATE"')
+  test -d "$S"
+  exec 9> "$S/alert-check.lock" && flock -w 120 9 || { echo "RECORD FAILED: an alert check is still running"; exit 1; }
+  test -s "$S/alert-pending/$B.tsv" || { echo "RECORD FAILED: unknown batch $B (already recorded?)"; exit 1; }
+  cut -f1 "$S/alert-pending/$B.tsv" >> "$S/alert-reported"
+  rm -f "$S/alert-pending/$B.tsv"
+  echo "RECORDED $B"
+  )
+  ```
+  If sending the message failed, do not run it. The problems stay unrecorded and the next alert check that
+  runs 90 minutes or more later hands them over again. If it prints `RECORD FAILED:`, tell the owner once per
+  day, like `ALERT CHECK: FAILED`.
 - `ALERT CHECK: FAILED`. Tell the owner once per day that the alert check could not run, with the error text.
 
 Do not acknowledge alerts, restart the scheduler, or change anything to fix a problem in this chat run.

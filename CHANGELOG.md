@@ -34,6 +34,11 @@ is the only supported version.
 - PRIVACY.md: conversations and voice content in the server-side export, and how to stop or remove it.
 
 ### Changed
+- Docs: Main's alert check no longer marks a problem as reported before the owner is told. Each run writes
+  its new problems to its own batch file (`state/alert-pending/`) and prints a batch id. The parent chat records
+  that batch in `state/alert-reported` only after its message was sent. A batch nobody confirmed holds its problems
+  back for 90 minutes and is then handed over again. The routine's scheduled prompt and the parent chat steps changed:
+  update the existing routine with the new text. `tests/ci-install.sh` runs both steps from the doc.
 - Docs: GrokBox-Assist's routine now runs twice a day (one routine, two times, e.g. `0 9,21 * * *`)
   instead of once. Main's export row is refreshed only through Assist's handoff, so this gives about
   14 h of slack for one delayed handoff, while a fully missed day still alerts at the unchanged

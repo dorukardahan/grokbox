@@ -244,16 +244,31 @@ check "Main scheduled prompt keeps B4–B6 and never runs B1–B3" bash -c '
 check "Assist scheduled prompt requires exact parent handoff" grep -Fxq 'EXPORT NOT DONE IN SCHEDULED RUN — parent: run the export loop now' "$REPO_DIR/docs/routine-assist.md"
 check "daily export check is executable and documented" bash -c 'test -x "$1/export-freshness.sh" && grep -q "export-freshness.sh" "$1/README.md"' _ "$REPO_DIR"
 
-step "4. Main alert check (docs/routine-main.md) reports a problem once"
+step "4. Main alert check (docs/routine-main.md) reports a problem once, recorded only after the parent chat confirms"
 AC_REPO="$TMP/alertcheck"; mkdir -p "$AC_REPO/state"
 cp "$REPO_DIR/lib.sh" "$REPO_DIR/config.env.example" "$AC_REPO/"
 printf '#!/usr/bin/env bash\ncat "%s/doctor.out"\n' "$AC_REPO" > "$AC_REPO/doctor.sh"; chmod +x "$AC_REPO/doctor.sh"
 sed -n '/^1\. Run exactly this and read its output:/,/^2\. If any output line starts/p' "$REPO_DIR/docs/routine-main.md" \
   | sed '1d;$d' | sed "s|<REPO>|$AC_REPO|g" > "$AC_REPO/check.sh"
 check "alert check step 1 is extracted from the doc" test -s "$AC_REPO/check.sh"
-ac_new() { env -u GB_CONFIG -u GB_STATE "$@" bash "$AC_REPO/check.sh" | awk 'f {print} /^--- new problems:/ {f=1}'; }
+sed -n '/^### Alert check parent chat/,$p' "$REPO_DIR/docs/routine-main.md" | sed -n '/^  ```text/,/^  ```/p' \
+  | sed '1d;$d' | sed 's/^  //' | sed "s|<REPO>|$AC_REPO|g" > "$AC_REPO/record.sh"
+check "alert check record step is extracted from the doc" test -s "$AC_REPO/record.sh"
+ac_new() { env -u GB_CONFIG -u GB_STATE "$@" bash "$AC_REPO/check.sh" > "$AC_REPO/last.out"; sed -n 's/^--- batch: //p' "$AC_REPO/last.out" > "$AC_REPO/batch"; awk 'f && !/^--- batch:/ {print} /^--- new problems:/ {f=1}' "$AC_REPO/last.out"; }
+ac_rec() { local b="${1-$(cat "$AC_REPO/batch")}"; sed "s|<BATCH>|$b|" "$AC_REPO/record.sh" | env -u GB_CONFIG -u GB_STATE bash 2>&1; }
 printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running\nWARN x: y\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
 check "alert check: a new doctor PROBLEM is reported" bash -c '[[ "$1" == *"scheduler: NOT running"* && "$1" != *WARN* ]]' _ "$(ac_new)"
+b1=$(cat "$AC_REPO/batch")
+check "alert check: the first run prints a batch id and records nothing itself" bash -c 'test -n "$1" && test ! -s "$2/state/alert-reported" && test -s "$2/state/alert-pending/$1.tsv"' _ "$b1" "$AC_REPO"
+check "alert check: an unconfirmed problem is held back, not repeated an hour later" test -z "$(ac_new)"
+check "alert check: a run with nothing new prints no batch line" test ! -s "$AC_REPO/batch"
+touch -d '100 minutes ago' "$AC_REPO/state/alert-pending/"*.tsv
+check "alert check: a problem never confirmed is handed over again after 90 minutes, in a new batch" bash -c '[[ "$1" == *"scheduler: NOT running"* ]]' _ "$(ac_new)"
+b2=$(cat "$AC_REPO/batch")
+check "alert check: the repeated handoff has its own batch id" bash -c '[[ -n "$1" && "$1" != "$2" ]]' _ "$b2" "$b1"
+check "alert check: the record step needs a real batch id" bash -c '[[ "$1" == *"RECORD FAILED: bad batch id"* && "$2" == *"RECORD FAILED: unknown batch"* ]]' _ "$(ac_rec '../x')" "$(ac_rec 20000101T000000-1)"
+check "alert check: recording the confirmed batch stores its key and removes the batch" bash -c '[[ "$1" == "RECORDED $2" ]] && test -s "$3/state/alert-reported" && test ! -e "$3/state/alert-pending/$2.tsv"' _ "$(ac_rec "$b2")" "$b2" "$AC_REPO"
+check "alert check: a batch records only once" bash -c '[[ "$1" == *"RECORD FAILED: unknown batch"* ]]' _ "$(ac_rec "$b2")"
 printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running for 5 h\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
 check "alert check: the same problem with a changed detail is not repeated" test -z "$(ac_new)"
 echo '[2026-10-29 10:00:00 +03] [backup.sh] boom' > "$AC_REPO/state/ALERT"
@@ -271,6 +286,9 @@ printf 'PROBLEM  scheduler: NOT running\nOverall: PROBLEM\n' > "$AC_REPO/doctor.
 rm -rf "$AC_REPO/state/alert-current.tsv"; mkdir "$AC_REPO/state/alert-current.tsv"
 check "alert check: an unwritable state file gives CHECK FAILED, not nothing new" bash -c '[[ "$(env -u GB_CONFIG -u GB_STATE bash "$1" 2>&1)" == *"CHECK FAILED:"* ]]' _ "$AC_REPO/check.sh"
 rmdir "$AC_REPO/state/alert-current.tsv"
+rm -rf "$AC_REPO/state/alert-pending"; : > "$AC_REPO/state/alert-pending"
+check "alert check: an unwritable batch directory gives CHECK FAILED, not nothing new" bash -c '[[ "$(env -u GB_CONFIG -u GB_STATE bash "$1" 2>&1)" == *"CHECK FAILED:"* ]]' _ "$AC_REPO/check.sh"
+rm -f "$AC_REPO/state/alert-pending"
 printf 'config.env: no such file\n' > "$AC_REPO/doctor.out"
 check "alert check: a crashed doctor gives CHECK FAILED, not nothing new" bash -c '[[ "$(env -u GB_CONFIG -u GB_STATE bash "$1" 2>&1)" == *"CHECK FAILED:"* ]]' _ "$AC_REPO/check.sh"
 
