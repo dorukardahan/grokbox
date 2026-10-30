@@ -12,7 +12,7 @@ R_TIMEOUT=300   # status must answer quickly even if Drive hangs
 ts(){ [[ -s "$1" ]] && date -d "@$(cat "$1")" '+%F %H:%M %Z' || echo never; }
 if [[ "${1:-}" == --ack ]]; then alert_ack; exit 0; fi   # under state/alert.lock; also starts a new dedupe incident
 problems=0
-if [[ -z "$(alert_channels)" && "$ALERT_CHANNEL_REQUIRED" != 0 ]]; then
+if [[ -z "$(alert_channels)" && "$ALERT_CHANNEL_REQUIRED" != 0 && -z "$(chat_alert_check_fresh)" ]]; then
   problems=1
   echo "!! NO ALERT CHANNEL configured: nobody is told about failures (see docs/health-and-alerts.md, ./test-alert.sh)"
 fi

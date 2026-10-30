@@ -27,8 +27,10 @@ if [[ -s "$GB_STATE/ALERT" ]]; then
 else row OK alerts "none open"; fi
 channel_names=$(alert_channels)
 if [[ -z "$channel_names" ]]; then
+  chat_t=$(chat_alert_check_fresh)
   if [[ "$ALERT_CHANNEL_REQUIRED" == 0 ]]; then row OK "alert channel" "disabled on purpose"
-  else row WARN "alert channel" "NO ALERT CHANNEL: failures are only written to state/ALERT and logs, nobody is told. Set ALERT_NTFY_URL, ALERT_WEBHOOK_URL or ALERT_HOOK in config.env (docs/health-and-alerts.md), then run ./test-alert.sh"; fi
+  elif isnum "$chat_t"; then row OK "alert channel" "Grok Bot chat (GrokBox-Main's hourly alert check ran $(ago "$chat_t")); ntfy, webhook or hook are optional extras"
+  else row WARN "alert channel" "NO ALERT CHANNEL: failures are only written to state/ALERT and logs, nobody is told. Set up GrokBox-Main's hourly alert check (docs/routine-main.md) or set ALERT_NTFY_URL, ALERT_WEBHOOK_URL or ALERT_HOOK in config.env (docs/health-and-alerts.md), then run ./test-alert.sh"; fi
 elif [[ "$(kv_get "$GB_STATE/alert-delivery.status" result)" == failed ]]; then
   row WARN "alert channel" "last alert delivery FAILED $(ago "$(kv_epoch "$GB_STATE/alert-delivery.status" time)"); see logs/alert-hook.log, run ./test-alert.sh"
 elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" == failed ]]; then

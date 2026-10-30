@@ -110,8 +110,10 @@ faster or a separate push. They can be combined in private `config.env`:
 - Command: set `ALERT_HOOK` (examples below). Each channel uses `ALERT_HOOK_TIMEOUT` (default 60 s).
 
 Run `./test-alert.sh`: it sends a marked TEST synchronously and prints each channel's result; exit 0 = all passed, 1 = failed, 3 = none configured. It creates no incident.
-Doctor and status warn if no channel is configured. They cannot see the chat channel, so with GrokBox-Main's alert check
-as the only channel, set `ALERT_CHANNEL_REQUIRED=0` in `config.env` to silence that warning.
+Doctor and status warn if no channel is configured. A fresh `state/alert-reported` (GrokBox-Main's alert check ran within
+`ALERT_CHECK_MAX_HOURS`, default 26) counts as the chat channel, so a Grok Bot box with that routine needs no extra setting. Doctor's
+`alert channel` row then reads "Grok Bot chat" and OK. If the routine stops, the warning comes back. Set `ALERT_CHANNEL_REQUIRED=0`
+only for a box that deliberately has no alerting.
 Doctor also warns about failed real deliveries or tests. `logs/alert-hook.log` records failures without built-in destination URLs; failures never stop backups.
 
 `ALERT_HOOK` is a custom shell command run for every *new* alert with the alert text

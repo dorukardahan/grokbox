@@ -104,6 +104,17 @@ alert_channels(){
   [[ -n "$ALERT_HOOK" ]] && names+="${names:++}hook"
   printf '%s' "$names"
 }
+# Grok Bot's built-in alert path: GrokBox-Main's hourly alert check touches state/alert-reported on every run.
+# Prints that file's mtime (epoch) while it is newer than ALERT_CHECK_MAX_HOURS (default 26), else prints nothing.
+# A fresh file counts as a working chat alert channel; a missing or stale one does not.
+chat_alert_check_fresh(){
+  local f="$GB_STATE/alert-reported" max="${ALERT_CHECK_MAX_HOURS:-26}" t
+  [[ -e "$f" ]] || return 0
+  [[ "$max" =~ ^[0-9]{1,4}$ ]] && (( 10#$max > 0 )) && max=$((10#$max)) || max=26
+  t=$(stat -c %Y "$f" 2>/dev/null); [[ "$t" =~ ^[0-9]+$ ]] || return 0
+  (( $(date +%s) - t < max * 3600 )) && printf '%s' "$t"
+  return 0
+}
 # URLs travel only over stdin, quoted for curl's config parser (including embedded newlines).
 _alert_curl_config(){
   local url="$1"
