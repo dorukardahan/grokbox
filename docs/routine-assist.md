@@ -45,7 +45,7 @@ do not change other bots' settings, routines or memory.
    (numbered -1, -2, ...; the odd end marker cannot appear inside a result) and pass those files instead.
    Never edit, summarize or add facts.
 2. Scheduler self-heal + health, EVERY run (not only when Main missed its run):
-   cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat state/ALERT 2>/dev/null
+   cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat "$(bash -c '. ./lib.sh >/dev/null && printf %s "$GB_STATE"')/ALERT" 2>/dev/null
    (install.sh --schedule is a no-op when the scheduler runs; after a box move it starts it again.)
     Lock recovery: the timeout normally ends hung jobs automatically (TERM, then KILL after 60 seconds).
     Use ./install.sh --restart-scheduler --force only when the lock age exceeds
