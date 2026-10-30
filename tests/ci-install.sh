@@ -266,11 +266,19 @@ touch -d '100 minutes ago' "$AC_REPO/state/alert-pending/"*.tsv
 check "alert check: a problem never confirmed is handed over again after 90 minutes, in a new batch" bash -c '[[ "$1" == *"scheduler: NOT running"* ]]' _ "$(ac_new)"
 b2=$(cat "$AC_REPO/batch")
 check "alert check: the repeated handoff has its own batch id" bash -c '[[ -n "$1" && "$1" != "$2" ]]' _ "$b2" "$b1"
-check "alert check: the record step needs a real batch id" bash -c '[[ "$1" == *"RECORD FAILED: bad batch id"* && "$2" == *"RECORD FAILED: unknown batch"* ]]' _ "$(ac_rec '../x')" "$(ac_rec 20000101T000000-1)"
+check "alert check: the record step needs a real batch id" bash -c '[[ "$1" == *"RECORD FAILED: bad batch id"* && "$2" == *"RECORD SKIPPED: batch"* ]]' _ "$(ac_rec '../x')" "$(ac_rec 20000101T000000-1)"
 check "alert check: recording the confirmed batch stores its key and removes the batch" bash -c '[[ "$1" == "RECORDED $2" ]] && test -s "$3/state/alert-reported" && test ! -e "$3/state/alert-pending/$2.tsv"' _ "$(ac_rec "$b2")" "$b2" "$AC_REPO"
-check "alert check: a batch records only once" bash -c '[[ "$1" == *"RECORD FAILED: unknown batch"* ]]' _ "$(ac_rec "$b2")"
+check "alert check: a batch records only once" bash -c '[[ "$1" == *"RECORD SKIPPED: batch"* ]]' _ "$(ac_rec "$b2")"
 printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running for 5 h\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
 check "alert check: the same problem with a changed detail is not repeated" test -z "$(ac_new)"
+printf 'Overall: OK\n' > "$AC_REPO/doctor.out"; ac_new >/dev/null
+printf 'PROBLEM  scheduler: NOT running\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
+ac_new >/dev/null; b3=$(cat "$AC_REPO/batch")
+printf 'Overall: OK\n' > "$AC_REPO/doctor.out"; ac_new >/dev/null
+check "alert check: a batch whose problems resolved is closed, not left to record later" test ! -e "$AC_REPO/state/alert-pending/$b3.tsv"
+check "alert check: a late confirmation of a resolved batch records nothing" bash -c '[[ "$1" == *"RECORD SKIPPED:"* ]] && test ! -s "$2/state/alert-reported"' _ "$(ac_rec "$b3")" "$AC_REPO"
+printf 'PROBLEM  scheduler: NOT running\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
+check "alert check: the problem coming back after a late confirmation is reported as new" bash -c '[[ "$1" == *"scheduler: NOT running"* ]]' _ "$(ac_new)"
 echo '[2026-10-29 10:00:00 +03] [backup.sh] boom' > "$AC_REPO/state/ALERT"
 check "alert check: a new state/ALERT line is reported" bash -c '[[ "$1" == *"] boom" && "$1" != *scheduler* ]]' _ "$(ac_new)"
 printf 'Overall: OK\n' > "$AC_REPO/doctor.out"; rm -f "$AC_REPO/state/ALERT"; ac_new >/dev/null

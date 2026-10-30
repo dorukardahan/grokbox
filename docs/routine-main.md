@@ -161,8 +161,9 @@ the batch id. The parent chat records exactly that batch after it sent its messa
 so two overlapping runs cannot hide a problem from each other or record each other's problems.
 A batch the parent chat has not confirmed holds its problems back for 90 minutes, so the next hourly run does not
 tell the owner the same thing twice. After that the problems are printed again in a new batch, so a handoff the
-parent chat dropped is repeated until it is confirmed. A `flock` on `alert-check.lock` makes collecting and
-recording run one after the other.
+parent chat dropped is repeated until it is confirmed. Every run also drops from the batch files the problems that are no longer open, so a confirmation that arrives
+late cannot mark a later, new occurrence of the same problem as reported. A `flock` on `alert-check.lock` makes
+collecting and recording run one after the other.
 
 ### Alert check scheduled run
 ```text
@@ -190,6 +191,11 @@ touch "$S/alert-reported"
 awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' "$S/alert-current.tsv" "$S/alert-reported" > "$S/alert-reported.new"
 mv "$S/alert-reported.new" "$S/alert-reported"
 mkdir -p "$S/alert-pending"
+for f in "$S"/alert-pending/*.tsv; do
+  [ -e "$f" ] || continue
+  awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $1 in cur' "$S/alert-current.tsv" "$f" > "$f.tmp"
+  if [ -s "$f.tmp" ]; then touch -r "$f" "$f.tmp"; mv "$f.tmp" "$f"; else rm -f "$f.tmp" "$f"; fi
+done
 find "$S/alert-pending" -name '*.tsv' -mmin +1440 -delete
 find "$S/alert-pending" -name '*.tsv' -mmin -90 -exec cut -f1 {} + > "$S/alert-pending.keys"
 cat "$S/alert-reported" "$S/alert-pending.keys" > "$S/alert-hold.txt"
@@ -229,14 +235,14 @@ On each handoff, follow the line that matches the first line of the result:
   S=$(bash -c '. ./lib.sh >/dev/null && printf %s "$GB_STATE"')
   test -d "$S"
   exec 9> "$S/alert-check.lock" && flock -w 120 9 || { echo "RECORD FAILED: an alert check is still running"; exit 1; }
-  test -s "$S/alert-pending/$B.tsv" || { echo "RECORD FAILED: unknown batch $B (already recorded?)"; exit 1; }
+  test -s "$S/alert-pending/$B.tsv" || { echo "RECORD SKIPPED: batch $B is closed (recorded already, or its problems are resolved)"; exit 0; }
   cut -f1 "$S/alert-pending/$B.tsv" >> "$S/alert-reported"
   rm -f "$S/alert-pending/$B.tsv"
   echo "RECORDED $B"
   )
   ```
   If sending the message failed, do not run it. The problems stay unrecorded and the next alert check that
-  runs 90 minutes or more later hands them over again. If it prints `RECORD FAILED:`, tell the owner once per
+  runs 90 minutes or more later hands them over again. `RECORD SKIPPED:` needs no action. If it prints `RECORD FAILED:`, tell the owner once per
   day, like `ALERT CHECK: FAILED`.
 - `ALERT CHECK: FAILED`. Tell the owner once per day that the alert check could not run, with the error text.
 
