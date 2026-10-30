@@ -268,7 +268,7 @@ check "PRUNE_USE_TRASH=0: normal calls unchanged (still false)" bash -c '[[ "${1
 { cat "$TMP/config-rc.env"; echo 'RCLONE_SERVE_ARGS="--tpslimit 8"'; } > "$TMP/config-rcn.env"
 tan=$(GB_CONFIG="$TMP/config-rcn.env" bash -c 'source "$1/lib.sh"; printf "%s" "${RESTIC_OPTS_TRASH[*]}"' _ "$REPO_DIR")
 check "default PRUNE_USE_TRASH=1 adds --drive-use-trash=true even without the flag in RCLONE_SERVE_ARGS" bash -c '[[ "$1" == *use-trash=true* && "$1" != *use-trash=false* ]]' _ "$tan"
-check "check.sh prunes via RT (Drive trash)" grep -q 'RT prune' "$REPO_DIR/check.sh"
+check "check.sh prunes via RT (Drive trash): the logged restic call is RT prune" grep -q 'caller=check.sh:main .*wrapper=RT cmd=prune' "$TMP"/logs/backup-*.log
 { cat "$TMP/config.env"; echo 'unset RCLONE_NET_ARGS RESTIC_TIMEOUT_META RESTIC_TIMEOUT_FORGET RESTIC_TIMEOUT RESTIC_TIMEOUT_BACKUP RESTIC_TIMEOUT_CHECK LOCK_ALERT_HOURS HEARTBEAT_MAX_MIN PRUNE_USE_TRASH RCLONE_TIMEOUT'; } > "$TMP/config-old.env"
 run_ok "an older config.env without the new settings still works (lib.sh defaults)" env GB_CONFIG="$TMP/config-old.env" "$REPO_DIR/status.sh" --local
 check "...and prints Overall" grep -q '^Overall:' "$TMP/last.out"
