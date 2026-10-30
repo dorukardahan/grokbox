@@ -151,6 +151,8 @@ Slots are *due*-based: if the box was busy or off, the job catches up. `touch st
 > cookie stores, Grok Box's own rclone config - are stored **inside the encrypted repository**. Anyone with the
 > restic password and access to the Drive folder can restore them. Set `BACKUP_SECRETS=0` in `config.env` to
 > exclude them ([excludes-secrets.txt](excludes-secrets.txt)). The restic password file itself is never uploaded.
+> `BACKUP_SECRETS=0` does **not** leave out `config.env`: it is always in the snapshot, so any `ALERT_NTFY_URL`, `ALERT_WEBHOOK_URL` or
+> `ALERT_HOOK` secret in it is restorable too. To keep such a URL out of the backup, store it in a file under `secrets/` (left out by `BACKUP_SECRETS=0`) and let `ALERT_HOOK` read it.
 > Also: with the server-side export, secrets pasted into a chat end up in the exported transcripts
 > (`staging/server-export/`), which are backed up too.
 
