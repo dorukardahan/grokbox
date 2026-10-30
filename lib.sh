@@ -256,13 +256,13 @@ RCL() { timeout -k 30 "${RCLONE_TIMEOUT:-300}" "$GB_BIN/rclone" --config "$RCLON
 
 restic_lock_error() { grep -qi 'repository is already locked' "$1"; }
 # Call only while holding backup.lock; share the budget with promotion and check's startup unlock.
-restic_unlock_once() {
-  local what="$1" rc=0
+restic_unlock_once() {  # WHAT [REASON]: REASON says why the repository needed unlocking (default: it was locked)
+  local what="$1" reason="${2:-repository was locked}" rc=0
   [[ $GB_UNLOCK_DONE == 0 ]] || return 0
   GB_UNLOCK_DONE=1
   R unlock >>"$LOG" 2>&1 || rc=$?
   log "$what: plain restic unlock ran rc=$rc"
-  alert "$what: repository was locked; plain restic unlock (stale locks only) was run before retrying"
+  alert "$what: $reason; plain restic unlock (stale locks only) was run before retrying (rc=$rc)"
 }
 restic_retry_unlock() {  # WRAPPER SUBCOMMAND [args...]; keep stdout unchanged
   local wrapper="$1" cmd="$2" err rc=0; shift 2
