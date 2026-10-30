@@ -183,16 +183,16 @@ printf '%s  %s\n' "$RB_SHA" "$RB_NAME" > "$SRV/rs.sums"
 run_ok "install.sh resolves relative GB_CHECKSUMS before cd into temp dir" \
   bash -c 'cd "$1" && PATH="$1/fakebin:$PATH" GB_CONFIG="$1/config-rel.env" GB_CHECKSUMS="checksums.good" "$2/install.sh"' _ "$TMP" "$REPO_DIR"
 
-step "3. Runbooks (docs/runbooks.md) and offline restic repair/rewrite verification"
+step "3. Runbooks: doc lint (keywords in docs/runbooks.md) and offline restic repair/rewrite verification"
 RB_DOC="$REPO_DIR/docs/runbooks.md"
 check "docs/runbooks.md exists" test -s "$RB_DOC"
-check "runbook covers repository repair (repair index)" grep -q "repair index" "$RB_DOC"
-check "runbook covers repository repair (repair snapshots)" grep -q "repair snapshots" "$RB_DOC"
-check "runbook warns never to prune during repair" grep -qi 'never.*prune' "$RB_DOC"
-check "runbook covers Drive trash recovery (rclone backend untrash)" grep -q "rclone backend untrash" "$RB_DOC"
-check "runbook covers Drive trash recovery (PRUNE_USE_TRASH)" grep -q "PRUNE_USE_TRASH" "$RB_DOC"
-check "runbook covers wrong BACKUP_HOST (rewrite --new-host)" grep -q -- "--new-host" "$RB_DOC"
-check "runbook covers wrong BACKUP_HOST (restore.sh --any-host fallback)" grep -q -- "--any-host" "$RB_DOC"
+check "doc lint: runbook covers repository repair (repair index)" grep -q "repair index" "$RB_DOC"
+check "doc lint: runbook covers repository repair (repair snapshots)" grep -q "repair snapshots" "$RB_DOC"
+check "doc lint: runbook warns never to prune during repair" grep -qi 'never.*prune' "$RB_DOC"
+check "doc lint: runbook covers Drive trash recovery (rclone backend untrash)" grep -q "rclone backend untrash" "$RB_DOC"
+check "doc lint: runbook covers Drive trash recovery (PRUNE_USE_TRASH)" grep -q "PRUNE_USE_TRASH" "$RB_DOC"
+check "doc lint: runbook covers wrong BACKUP_HOST (rewrite --new-host)" grep -q -- "--new-host" "$RB_DOC"
+check "doc lint: runbook covers wrong BACKUP_HOST (restore.sh --any-host fallback)" grep -q -- "--any-host" "$RB_DOC"
 check "runbook read-only restic examples do not take locks" python3 - "$RB_DOC" <<'PYNOLOCK'
 import re,sys
 examples=[]
