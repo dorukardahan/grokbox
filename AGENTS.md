@@ -92,7 +92,7 @@ If the dry run or backup exits with 4, the stale guard tripped: see rule 3. On e
 ### 7. Start the scheduler
 ```bash
 ./install.sh --schedule             # starts scheduler.sh (idempotent: no-op if running)
-./status.sh                         # expect "Overall: OK" once the first snapshot exists
+./status.sh                         # expect "Overall: OK" once the first snapshot exists (before step 9/10 the only problem it may show is the "NO ALERT CHANNEL" line: expected, ignore it)
 ```
 The scheduler is a background process: it **dies on a box move** (and with it all backups). That is what step 10 fixes.
 

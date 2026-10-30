@@ -210,7 +210,7 @@ stored text is verbatim or a summary, and how long the server keeps it. Grok Box
 4. `./install.sh --init`, `./backup.sh --dry-run`, `./backup.sh`, `./install.sh --schedule`, `./status.sh`.
 5. Your bot creates **GrokBox-Main** and **GrokBox-Assist** ([docs/bots.md](docs/bots.md)) and briefs them. Each creates its own daily
    routine for health, memory and mandatory handoff ([Main](docs/routine-main.md), [Assist](docs/routine-assist.md)) and runs the first full export in its normal chat. They report only problems.
-6. First restore drill (`./test-restore.sh`, `./doctor.sh`), an alert channel (`ALERT_HOOK`) and the `EXPECTED_BOTS` roster.
+6. First restore drill (`./test-restore.sh`, `./doctor.sh`) and the `EXPECTED_BOTS` roster. An extra alert channel (`ALERT_HOOK`, `ALERT_WEBHOOK_URL` or `ALERT_NTFY_URL`) is optional: GrokBox-Main's alert check from step 5 already tells the owner.
 
 ## Test
 `tests/smoke.sh` runs the whole flow in a temp dir against a local restic repo (no Google Drive needed): install, init, backups, restore with checksum verification,
