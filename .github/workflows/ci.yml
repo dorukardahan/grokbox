@@ -1,0 +1,60 @@
+# Grok Box CI: shellcheck and every test suite on pushes to main and on pull requests.
+# Same as ci/github-actions-ci.yml.example (keep them in sync).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends shellcheck sqlite3 bzip2 unzip curl python3
+
+      - name: ShellCheck
+        run: |
+          shopt -s nullglob
+          shellcheck --severity=warning ./*.sh rebuild-kit/*.sh tests/*.sh
+
+      # smoke.sh downloads the pinned restic + rclone into bin/; the suites below reuse them
+      - name: Smoke test (tests/smoke.sh)
+        run: bash tests/smoke.sh
+
+      - name: CI, checksums and docs (tests/ci-install.sh)
+        run: bash tests/ci-install.sh
+
+      - name: Health checks and alerts (tests/health.sh)
+        run: bash tests/health.sh
+
+      - name: Locks and snapshot promotion (tests/locks.sh)
+        run: bash tests/locks.sh
+
+      - name: Maintenance (tests/maintenance.sh)
+        run: bash tests/maintenance.sh
+
+      - name: Any other test suites
+        run: |
+          shopt -s nullglob
+          for t in tests/*.sh; do
+            case "$t" in
+              tests/smoke.sh|tests/ci-install.sh|tests/health.sh|tests/locks.sh|tests/maintenance.sh) continue;;
+            esac
+            echo "=== Running $t ==="
+            bash "$t"
+          done
