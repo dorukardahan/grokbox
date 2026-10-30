@@ -1,15 +1,20 @@
 # Changelog
 
 All notable changes to this project are documented here. The format follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). There are no tagged releases yet; `main`
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/). The first tagged release is 0.1.0; `main`
 is the only supported version.
 
 ## [Unreleased]
+
+## [0.1.0] - 2026-10-30
+
+First public release.
 
 ### Fixed
 - `doctor.sh` and `status.sh` no longer say "NO ALERT CHANNEL" on a Grok Bot box where GrokBox-Main's hourly alert
   check is running. A fresh `state/alert-reported` (younger than `ALERT_CHECK_MAX_HOURS`, default 26) now counts as the
   chat alert channel and the doctor row reads OK. A stale or missing file still warns. ntfy, webhook and `ALERT_HOOK` work as before.
+
 ### Changed
 - README opens with who it is for and what it costs, shows the three steps that need the owner as a short list, and drops the vague "inspired by" line.
 
