@@ -271,13 +271,7 @@ if [[ -n "$SNAPSHOT" ]]; then
       break
     fi
     log "backup ($MODE): snapshot promotion attempt $attempt failed: $promotion_failure"
-    if [[ $attempt == 1 && $GB_UNLOCK_DONE == 0 ]]; then
-      GB_UNLOCK_DONE=1
-      unlock_rc=0
-      R unlock >>"$LOG" 2>&1 || unlock_rc=$?
-      log "backup ($MODE): plain restic unlock ran rc=$unlock_rc"
-      alert "backup ($MODE): promotion was blocked/failed; plain restic unlock (stale locks only) was run before retrying (rc=$unlock_rc)"
-    fi
+    if [[ $attempt == 1 ]]; then restic_unlock_once "backup ($MODE)" "promotion was blocked/failed"; fi
   done
 fi
 rm -f "$promote_list" "$promote_err" "$tag_out"
