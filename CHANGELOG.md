@@ -39,6 +39,8 @@ is the only supported version.
 - PRIVACY.md: conversations and voice content in the server-side export, and how to stop or remove it.
 
 ### Changed
+- Main's hourly alert check (`docs/routine-main.md`) now also reports a `WARN hourly slots` row from `doctor.sh`,
+  so a missed hourly backup reaches the owner before the 3 h no-success watchdog. Other WARN rows stay unreported.
 - Docs: Main's alert check no longer marks a problem as reported before the owner is told. Each run writes
   its new problems to its own batch file (`state/alert-pending/`) and prints a batch id. The parent chat records
   that batch in `state/alert-reported` only after its message was sent. A batch nobody confirmed holds its problems
