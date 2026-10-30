@@ -49,6 +49,8 @@ Out of scope (please report upstream):
   `~/.config/rclone`, `.env` files, browser cookie stores, and Grok Box's own `secrets/` except the
   restic password) are stored **inside the encrypted repository**. Set `BACKUP_SECRETS=0` in
   `config.env` to leave them out (list: [excludes-secrets.txt](excludes-secrets.txt)).
+  `config.env` itself is **not** covered by that switch: it is always backed up, including any alert
+  webhook or ntfy URL (and `ALERT_HOOK` command) in it. Treat those values like secrets that end up in the repository.
 - With the optional server-side export, bot conversations are backed up too, including anything a
   user pasted into a chat (secrets as well).
 - What a box backup cannot contain: README ["Limits"](README.md#limits-what-a-box-backup-cannot-contain).
