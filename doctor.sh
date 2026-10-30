@@ -201,7 +201,7 @@ fi
 # --- quota / disk (state/quota.status, written once a day by quota-check.sh during the daily check)
 q="$GB_STATE/quota.status"
 qp="${QUOTA_ALERT_PCT:-90}"; [[ "$qp" =~ ^[0-9]+$ ]] || qp=90; qp=$((10#$qp))
-dpct=$(kv_num "$q" drive_pct); kpct=$(kv_num "$q" disk_pct); qt=$(kv_epoch "$q" time); kpath=$(kv_get "$q" disk_path | cut -c1-80)
+dpct=$(kv_num "$q" drive_pct); dused=$(kv_num "$q" drive_used); kpct=$(kv_num "$q" disk_pct); qt=$(kv_epoch "$q" time); kpath=$(kv_get "$q" disk_path | cut -c1-80)
 if ! isnum "$dpct" && ! isnum "$kpct"; then
   row WARN "quota/disk" "unknown: no usable state/quota.status (written daily by quota-check.sh) - Drive/disk usage cannot be seen"
 elif isnum "$qt" && (( now - qt >= 48 * 3600 )); then
@@ -211,6 +211,8 @@ else
   worst=0; isnum "$dpct" && worst=$dpct; isnum "$kpct" && (( kpct > worst )) && worst=$kpct
   if (( worst >= qp )); then row PROBLEM "quota/disk" "$det: nearly full (${qp}%+): free space or a bigger plan, else backups will fail"
   elif (( worst >= 80 )); then row WARN "quota/disk" "$det: getting full (80%+)"
+  elif is_rclone_repo && ! isnum "$dpct" && ! isnum "$dused"; then   # unlimited plans report used but no total: not unreadable
+  row WARN "quota/disk" "$det: Drive quota could not be read (rclone about failed or answered nothing usable, see the log), so a full Drive would go unnoticed"
   else row OK "quota/disk" "$det"; fi
 fi
 

@@ -1046,6 +1046,18 @@ check "disk 85%: WARN only -> exit 1" all test "$rc" = 1 --and-- grep -q '^WARN 
 printf 'drive_pct=95\ntime=%s\n' "$(now_s)" > "$D/quota.status"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "Drive 95%: PROBLEM -> exit 2" all test "$rc" = 2 --and-- grep -q '^PROBLEM *quota/disk' "$TMP/doc.out"
+dcq=$(mkcfg doc-rclone-quota "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'GB_REMOTE=fakedrive' 'export RESTIC_REPOSITORY="rclone:fakedrive:GrokBox/restic"')
+printf 'disk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
+rc=0; GB_CONFIG="$dcq" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "rclone repo, Drive quota unreadable (no drive_pct): quota/disk is WARN, never OK" all grep -q '^WARN *quota/disk: .*Drive quota could not be read' "$TMP/doc.out" --and-- not grep -q '^OK *quota/disk' "$TMP/doc.out"
+rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "local repo, no Drive quota by design: quota/disk stays OK" grep -q '^OK *quota/disk: Drive ?% used, local disk 20% used' "$TMP/doc.out"
+printf 'drive_used=5\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
+rc=0; GB_CONFIG="$dcq" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "rclone repo, Drive answered without a total (unlimited plan): not treated as unreadable" all grep -q '^OK *quota/disk' "$TMP/doc.out" --and-- not grep -q 'could not be read' "$TMP/doc.out"
+printf 'drive_pct=30\ndisk_pct=20\ntime=%s\n' "$(now_s)" > "$D/quota.status"
+rc=0; GB_CONFIG="$dcq" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "rclone repo, both measured: quota/disk is OK" grep -q '^OK *quota/disk: Drive 30% used, local disk 20% used' "$TMP/doc.out"
 rm -f "$D/quota.status"
 echo $(( $(now_s) - 3 * 3600 )) > "$D/scheduler.heartbeat"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true

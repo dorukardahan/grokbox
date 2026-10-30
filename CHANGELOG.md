@@ -46,6 +46,8 @@ is the only supported version.
   scheduled prompt. The handoff line is unchanged. `tests/ci-install.sh` checks the numbering.
 
 ### Fixed
+- `doctor.sh` no longer shows `OK quota/disk: Drive ?% used` when the Drive quota could not be read. For an
+  `rclone:` repository it now warns, because a full Drive would otherwise go unnoticed.
 - A backup no longer trips over its own restic lock: when the backup's restic process has exited but its lock is still
   in the repository (seen after a VM pause during the backup's start), snapshot promotion now lists locks first and,
   only if one is there, runs the stale-only unlock quietly before promoting. Promotion succeeds on the first try with no

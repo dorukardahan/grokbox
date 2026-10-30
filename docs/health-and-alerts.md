@@ -13,7 +13,7 @@ Five small features that make a running Grok Box easier to watch. All settings l
 One line per topic, each `OK`, `WARN` or `PROBLEM` with what it means and the next step:
 open alerts, pause flag and latches, scheduler + heartbeat, backup lock (free, or held by which job for how
 long), last complete backup, last check (and the `CHECK_FAILED` latch), Drive auth (token present in
-`rclone.conf`; `--online` tests it), quota/disk (`state/quota.status`), last test restore, Drive report
+`rclone.conf`; `--online` tests it), quota/disk (`state/quota.status`; WARN when an `rclone:` repository's Drive quota could not be read, never OK with `Drive ?%`), last test restore, Drive report
 upload, expected bots. Ends with `Overall: OK | WARN | PROBLEM`.
 
 | doctor row | what it shows |
