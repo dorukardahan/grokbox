@@ -36,6 +36,18 @@ elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" == failed ]]; then
 elif [[ "$(kv_get "$GB_STATE/alert-test.status" result)" != ok ]]; then
   row OK "alert channel" "configured ($channel_names), not tested yet: run ./test-alert.sh"
 else row OK "alert channel" "configured ($channel_names), test passed"; fi
+# --- Main's in-chat alert check (docs/routine-main.md "Alert check"): its run touches state/alert-reported every
+# hour from 08:25 to 23:25. A file that stopped moving means the routine is paused, deleted or failing before that
+# step, so nobody is told about problems in chat, even if the channel above is disabled on purpose. No file = the
+# routine was never set up here: no row.
+ar="$GB_STATE/alert-reported"
+if [[ -e "$ar" ]]; then
+  amax="${ALERT_CHECK_MAX_HOURS:-26}"; [[ "$amax" =~ ^[0-9]{1,4}$ ]] && (( 10#$amax > 0 )) && amax=$((10#$amax)) || amax=26
+  amt=$(stat -c %Y "$ar" 2>/dev/null); isnum "$amt" || amt=""
+  if [[ -z "$amt" ]]; then row WARN "alert check" "state/alert-reported exists but its age cannot be read"
+  elif (( now - amt >= amax * 3600 )); then row WARN "alert check" "Main's hourly alert-check routine last ran $(ago "$amt") (expected hourly, 08:25-23:25): it looks stopped, so problems are not reaching the owner's chat. Check the routine in Main's chat (docs/routine-main.md)"
+  else row OK "alert check" "Main's hourly alert-check routine last ran $(ago "$amt")"; fi
+fi
 [[ -f "$GB_STATE/PAUSE" ]] && row WARN paused "state/PAUSE exists: the scheduler starts no jobs (rm state/PAUSE to resume)"
 [[ -e "$GUARD_LATCH" ]] && row PROBLEM "stale guard" "latch set ($(cut -d' ' -f2- "$GUARD_LATCH" 2>/dev/null | cut -c1-120)); forget/prune blocked until a good hourly backup; see REBUILD.md, never --force blindly"
 [[ -e "$SQLITE_LATCH" ]] && row WARN "sqlite staging" "latch set since $(at "$(epochf "$SQLITE_LATCH")"): a consistent-copy run failed; forget/prune blocked until a fully clean hourly backup"

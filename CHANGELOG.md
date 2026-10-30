@@ -7,6 +7,9 @@ is the only supported version.
 ## [Unreleased]
 
 ### Added
+- `doctor.sh` row `alert check`: WARN when `state/alert-reported` has not been touched for 26 hours
+  (`ALERT_CHECK_MAX_HOURS`), because GrokBox-Main's hourly alert-check routine then looks stopped and problems
+  no longer reach the owner's chat, even with `ALERT_CHANNEL_REQUIRED=0`.
 - Docs: GrokBox-Main's chat is now the default alert channel. `docs/routine-main.md` has a second,
   hourly "alert check" routine. It collects new `state/ALERT` lines and `doctor.sh` PROBLEM rows, keeps
   the keys it already reported in `state/alert-reported`, and hands only new problems to Main's chat

@@ -949,6 +949,21 @@ d = json.load(open(sys.argv[1])); a, c = d["checks"][:2]
 assert d["exit"] == 1 and a["name"] == "alerts"
 assert c["name"] == "alert channel" and c["status"] == "WARN" and "NO ALERT CHANNEL" in c["detail"]
 PY
+touch "$D/alert-reported"
+rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "Main alert check ran just now (channel disabled on purpose): row OK, exit 0" all test "$rc" = 0 --and-- grep -q '^OK *alert check: .*last ran [0-9]* min ago' "$TMP/doc.out"
+touch -d '25 hours ago' "$D/alert-reported"
+rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "alert check 25 h ago: still OK (routine runs 08:25-23:25, the longest gap is 9 h)" all test "$rc" = 0 --and-- grep -q '^OK *alert check: ' "$TMP/doc.out"
+touch -d '27 hours ago' "$D/alert-reported"
+rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "alert check 27 h ago: WARN even though the channel is disabled on purpose" all test "$rc" = 1 --and-- grep -q '^WARN *alert check: .*27 h ago.*docs/routine-main.md' "$TMP/doc.out" --and-- grep -q '^OK *alert channel: disabled on purpose' "$TMP/doc.out"
+dcmax=$(mkcfg doc-alert-max "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHECK_MAX_HOURS=48')
+rc=0; GB_CONFIG="$dcmax" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "ALERT_CHECK_MAX_HOURS=48: 27 h is fine" all test "$rc" = 0 --and-- grep -q '^OK *alert check: ' "$TMP/doc.out"
+rm -f "$D/alert-reported"
+rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
+check "no state/alert-reported (routine not set up): no alert check row, nothing new to warn about" all test "$rc" = 0 --and-- not grep -q 'alert check' "$TMP/doc.out"
 dcchan=$(mkcfg doc-channel "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1' \
   'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
   'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"')
