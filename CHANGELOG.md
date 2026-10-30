@@ -14,6 +14,7 @@ is the only supported version.
 - README opens with who it is for and what it costs, shows the three steps that need the owner as a short list, and drops the vague "inspired by" line.
 
 ### Added
+- GitHub Actions CI is enabled (`.github/workflows/ci.yml`, same content as `ci/github-actions-ci.yml.example`): shellcheck and every test suite on pushes to `main` and on pull requests.
 - `doctor.sh` row `last backup` now warns when the last complete hourly backup left out unreadable files (the
   count is in `last-backup.result`). Before, a repeated omission was logged but doctor said OK.
 - `doctor.sh` row `alert check`: WARN when `state/alert-reported` has not been touched for 26 hours
