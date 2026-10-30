@@ -20,6 +20,9 @@ git clone https://github.com/dorukardahan/grokbox /workspace/grokbox
 
 It also asks a few quick choices: time zone, whether credentials go into the backup, and where alerts are sent.
 
+![./doctor.sh on a real Grok Bot box: one plain-language OK, WARN or PROBLEM line per topic](docs/img/doctor.png)
+*`./doctor.sh` on a live box, with the host and Drive path shown as the defaults. The two WARN rows are a disk at 80% and one bot's export warning.*
+
 > **Status & disclaimer**
 > - A community project, maintained best-effort. Provided **as is** under the MIT license, with no warranty.
 > - Backups can fail. Test your restores (`./test-restore.sh`, `./doctor.sh`); you are responsible for your data.
