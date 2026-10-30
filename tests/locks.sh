@@ -370,7 +370,8 @@ for scenario in tag snapshots snapshots-tail recover unlock forget; do
       export HANG_COMMAND=tag HANG_COUNT=1
       check 'silent first tag recovers on second attempt' run_hung_backup 0 20
       check 'recovered tag is verified promoted' verified_snapshot
-      check 'timeout recovery uses one plain unlock' test "$(grep -cx unlock "$TMP/args")" = 1;;
+      check 'timeout recovery uses one plain unlock' test "$(grep -cx unlock "$TMP/args")" = 1
+      check 'promotion retry unlock raises its own alert, with the unlock exit code' grep -q 'backup (auto): promotion was blocked/failed; plain restic unlock (stale locks only) was run before retrying (rc=0)' "$TMP/state/ALERT";;
     unlock)
       export TAG_FAILURES=1
       check 'silent unlock remains bounded' run_hung_backup 0 20
