@@ -1251,6 +1251,30 @@ check "fresh scheduler catches up the previous due slot before this week's time"
 sched_case prior-success 60 6 succeeded '2000-01-09 03:00' '2000-01-10 03:00'
 check "a prior success keeps failed weekly slot marked without daily retries" all test "$(cat "$SC_STATE/calls")" = --weekly --and-- test "$(cat "$SC_STATE/sched-test-restore")" = 2000-01-09 --and-- test ! -e "$SC_STATE/sched-test-restore-retry"
 
+step "scheduler watchdog: 'no successful HOURLY snapshot' alarm (failing backup stub, fake clock)"
+printf '#!/usr/bin/env bash\nset -Eeuo pipefail\necho "$*" >> "$SC_STATE/backup-calls"\nexit 6\n' > "$SC/backup.sh"; chmod +x "$SC/backup.sh"
+wd_case() {   # NAME HOURS_BEFORE_FIRST_TICK|none TICK...: hourly backup always fails, watchdog runs every hour from minute 0
+  local name="$1" age="$2" cfg tick rc=0; shift 2
+  export SC_STATE="$SC/wd-$name"; mkdir -p "$SC_STATE"
+  : > "$SC_STATE/calls"; echo 0 > "$SC_STATE/outcomes"; touch "$SC_STATE/test-restore-attempted"
+  /usr/bin/date -u -d '2000-01-09 01:00' +%s > "$SC_STATE/clock"
+  for tick in "$@"; do /usr/bin/date -u -d "$tick" +%s; done > "$SC_STATE/ticks"
+  [[ "$age" == none ]] || echo $(( $(head -1 "$SC_STATE/ticks") - age * 3600 )) > "$SC_STATE/last-success"
+  cfg=$(mkcfg "sched-wd-$name" "GB_DIR=$SC" "GB_BIN=$SC/clockbin" "GB_STATE=$SC_STATE" HOURLY_AT_MIN=0 QUICK_EVERY_MIN=0 WATCHDOG_AT_MIN=0 ALERT_NO_SUCCESS_HOURS=3 'DAILY_CHECK_AT="23:59"' TEST_RESTORE_WEEKDAY=3 'TEST_RESTORE_AT="02:20"')
+  PATH="$SC/clockbin:$PATH" GB_CONFIG="$cfg" timeout -k 1 5 "$SC/scheduler.sh" > "$SC_STATE/output" 2>&1 || rc=$?
+  check "watchdog $name: scheduler completed the controlled ticks" test "$rc" = 143
+  check "watchdog $name: the hourly backup was attempted and failed" test -s "$SC_STATE/backup-calls"
+}
+wd_case stale 8 '2000-01-09 03:00' '2000-01-09 03:30'
+check "last success 8 h old: state/ALERT names the missing hourly snapshot and its age" grep -q 'no successful HOURLY snapshot for 8h (last: ' "$SC_STATE/ALERT"
+check "...and raises it once per hour, not on every tick" test "$(grep -c 'no successful HOURLY snapshot' "$SC_STATE/ALERT")" = 1
+wd_case recent 1 '2000-01-09 03:00'
+check "last success 1 h old (below ALERT_NO_SUCCESS_HOURS): no watchdog alarm" not grep -qs 'no successful HOURLY' "$SC_STATE/ALERT"
+wd_case never none '2000-01-09 05:00'
+check "no success since the scheduler first started: alarm counts from the first start" grep -q 'no successful HOURLY snapshot for 4h (none since the scheduler first started)' "$SC_STATE/ALERT"
+unset SC_STATE
+printf '#!/usr/bin/env bash\nset -Eeuo pipefail\ndate +%%s > "$SC_STATE/last-success"\n' > "$SC/backup.sh"; chmod +x "$SC/backup.sh"
+
 step "scheduler: weekly test restore slot is due-based and followed by report.sh (waits for the next minute tick)"
 SCHED_CFG=$(mkcfg sched 'HOURLY_AT_MIN=60' 'QUICK_EVERY_MIN=0' 'WATCHDOG_AT_MIN=60' 'DAILY_CHECK_AT="23:59"' "TEST_RESTORE_WEEKDAY=$(TZ=UTC date +%w)" 'TEST_RESTORE_AT="00:00"')
 echo "2000-01-01" > "$TMP/state/sched-test-restore"; rm -f "$TMP/state/test-restore.result" "$TMP/state/latest-backup-report.txt"
