@@ -10,6 +10,8 @@ is the only supported version.
 - `doctor.sh` and `status.sh` no longer say "NO ALERT CHANNEL" on a Grok Bot box where GrokBox-Main's hourly alert
   check is running. A fresh `state/alert-reported` (younger than `ALERT_CHECK_MAX_HOURS`, default 26) now counts as the
   chat alert channel and the doctor row reads OK. A stale or missing file still warns. ntfy, webhook and `ALERT_HOOK` work as before.
+### Changed
+- README opens with who it is for and what it costs, shows the three steps that need the owner as a short list, and drops the vague "inspired by" line.
 
 ### Added
 - `doctor.sh` row `last backup` now warns when the last complete hourly backup left out unreadable files (the
