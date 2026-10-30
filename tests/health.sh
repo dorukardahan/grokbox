@@ -1116,6 +1116,10 @@ check "last-backup.result incomplete after a complete one: WARN with the unreada
 printf 'result=complete\ntime=%s\nsnapshot=deadbeef\nfiles=10\n' "$(now_s)" > "$D/last-backup.result"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "last-backup.result complete: OK line names snapshot + files" grep -q '^OK *last backup: complete .*snapshot deadbeef, 10 files' "$TMP/doc.out"
+printf 'result=complete\ntime=%s\nsnapshot=deadbeef\nfiles=10\nunreadable=3\n' "$(now_s)" > "$D/last-backup.result"
+GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
+check "complete run that left out unreadable files (warnings): WARN with the count, not OK" grep -q '^WARN *last backup: complete .*, but 3 unreadable file(s) were left out' "$TMP/doc.out"
+check "...and no OK last backup row" not grep -q '^OK *last backup' "$TMP/doc.out"
 echo $(( $(now_s) - 5 * 3600 )) > "$D/last-success"; printf 'result=complete\ntime=%s\n' "$(( $(now_s) - 5 * 3600 ))" > "$D/last-backup.result"
 GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || true
 check "last complete backup 5h old (> ALERT_NO_SUCCESS_HOURS): PROBLEM" grep -q '^PROBLEM *last backup: last COMPLETE hourly backup is 5 h old' "$TMP/doc.out"

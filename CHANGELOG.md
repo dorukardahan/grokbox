@@ -7,6 +7,8 @@ is the only supported version.
 ## [Unreleased]
 
 ### Added
+- `doctor.sh` row `last backup` now warns when the last complete hourly backup left out unreadable files (the
+  count is in `last-backup.result`). Before, a repeated omission was logged but doctor said OK.
 - `doctor.sh` row `alert check`: WARN when `state/alert-reported` has not been touched for 26 hours
   (`ALERT_CHECK_MAX_HOURS`), because GrokBox-Main's hourly alert-check routine then looks stopped and problems
   no longer reach the owner's chat, even with `ALERT_CHANNEL_REQUIRED=0`.

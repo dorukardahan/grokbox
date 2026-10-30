@@ -97,6 +97,8 @@ if [[ -n "$ok_t" ]]; then
   elif [[ "$lres" =~ ^(incomplete|failed|timeout)$ ]] && isnum "$lt" && (( lt > ok_t )); then
     row WARN "last backup" "the last run ($(at "$lt")) ended $lres${lunread:+ ($lunread unreadable file(s))}; last complete one $(ago "$ok_t")"
   elif isnum "$part_t" && (( part_t >= ok_t )); then row WARN "last backup" "the last run ($(at "$part_t")) was INCOMPLETE (unreadable files, see logs); last complete one $(ago "$ok_t")"
+  elif [[ "$lres" == complete ]] && isnum "$lunread" && (( lunread > 0 )); then
+    row WARN "last backup" "$det, but $lunread unreadable file(s) were left out of the snapshot (logs/backup-$(date +%Y-%m).log lists up to 20): fix their permissions or add them to EXTRA_EXCLUDES"
   else row OK "last backup" "$det"; fi
 elif isnum "$first" && (( now - first >= ${FIRST_SUCCESS_GRACE_HOURS:-2} * 3600 )); then
   row PROBLEM "last backup" "no complete hourly backup yet, $(( (now - first) / 3600 )) h after the first start; run ./backup.sh and read its output"
