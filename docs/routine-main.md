@@ -44,7 +44,7 @@ never read the server any other way (no cookies, scraped tokens or internal APIs
 do not change other bots' settings, routines or memory.
 
 PART A - box backup health
-A1. Run: cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat state/ALERT 2>/dev/null
+A1. Run: cd <REPO> && ./install.sh --schedule; sched_rc=$?; ./status.sh --local; echo "schedule_rc=$sched_rc"; echo "--- open alerts:"; cat "$(bash -c '. ./lib.sh >/dev/null && printf %s "$GB_STATE"')/ALERT" 2>/dev/null
     Always run status.sh --local, even if install.sh --schedule failed.
 A2. Healthy = schedule_rc=0 AND the last status line is "Overall: OK" AND nothing is printed after
     "--- open alerts:". If healthy, go to B4. Include every open alert line in the handoff; the parent chat reports it to the owner.
@@ -130,7 +130,8 @@ final check in the chat right away. The first export may need many paging rounds
 
 ## Alert check (second routine, hourly)
 This routine makes GrokBox-Main's chat the default alert channel. A new `state/ALERT` line or a new
-`PROBLEM` row in `doctor.sh` reaches the owner within an hour, with no ntfy app, webhook or `ALERT_HOOK`.
+`PROBLEM` row in `doctor.sh` reaches the owner at the next run (hourly from 08:25 to 23:25 with the default
+schedule below; overnight problems arrive at 08:25), with no ntfy app, webhook or `ALERT_HOOK`.
 The scheduler cannot do this itself: only a bot chat can write to the owner. Those three settings stay
 available as extra channels ([health-and-alerts.md](health-and-alerts.md#get-alerts-to-a-human)).
 
