@@ -256,8 +256,8 @@ sed -n '/^### Alert check parent chat/,$p' "$REPO_DIR/docs/routine-main.md" | se
 check "alert check record step is extracted from the doc" test -s "$AC_REPO/record.sh"
 ac_new() { env -u GB_CONFIG -u GB_STATE "$@" bash "$AC_REPO/check.sh" > "$AC_REPO/last.out"; sed -n 's/^--- batch: //p' "$AC_REPO/last.out" > "$AC_REPO/batch"; awk 'f && !/^--- batch:/ {print} /^--- new problems:/ {f=1}' "$AC_REPO/last.out"; }
 ac_rec() { local b="${1-$(cat "$AC_REPO/batch")}"; sed "s|<BATCH>|$b|" "$AC_REPO/record.sh" | env -u GB_CONFIG -u GB_STATE bash 2>&1; }
-printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running\nWARN x: y\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
-check "alert check: a new doctor PROBLEM is reported" bash -c '[[ "$1" == *"scheduler: NOT running"* && "$1" != *WARN* ]]' _ "$(ac_new)"
+printf 'OK alerts: none open\nPROBLEM  scheduler: NOT running\nWARN x: y\nWARN     hourly slots: 2 missed of 9 completed hours: 03:00, 04:00\nOverall: PROBLEM\n' > "$AC_REPO/doctor.out"
+check "alert check: a new doctor PROBLEM is reported, and so is a missed hourly slot, but not other WARN rows" bash -c '[[ "$1" == *"scheduler: NOT running"* && "$1" == *"hourly slots: 2 missed"* && "$1" != *"WARN x"* ]]' _ "$(ac_new)"
 b1=$(cat "$AC_REPO/batch")
 check "alert check: the first run prints a batch id and records nothing itself" bash -c 'test -n "$1" && test ! -s "$2/state/alert-reported" && test -s "$2/state/alert-pending/$1.tsv"' _ "$b1" "$AC_REPO"
 check "alert check: an unconfirmed problem is held back, not repeated an hour later" test -z "$(ac_new)"

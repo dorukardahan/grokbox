@@ -133,6 +133,8 @@ This routine makes GrokBox-Main's chat the default alert channel. A new `state/A
 `PROBLEM` row in `doctor.sh` reaches the owner within an hour, with no ntfy app, webhook or `ALERT_HOOK`.
 The scheduler cannot do this itself: only a bot chat can write to the owner. Those three settings stay
 available as extra channels ([health-and-alerts.md](health-and-alerts.md#get-alerts-to-a-human)).
+A `WARN hourly slots` row from `doctor.sh` (a missed hourly backup) is reported too, so a skipped hour is not
+silent until the 3 h watchdog fires. Other WARN rows are not reported.
 
 Create it with `UpdateRoutine`, as a second routine next to the daily one. Do not fold it into the daily
 prompt, which runs once a day. Each run only reads. It never acknowledges alerts, restarts the scheduler,
@@ -185,7 +187,7 @@ exec 9> "$S/alert-check.lock" && flock -w 120 9 || { echo "CHECK FAILED: another
 ./doctor.sh > "$S/alert-doctor.out" 2>&1 || true
 grep -q '^Overall:' "$S/alert-doctor.out" || { echo "CHECK FAILED: doctor.sh printed no Overall line:"; head -c 300 "$S/alert-doctor.out"; exit 1; }
 { [ -s "$S/ALERT" ] && awk '{print "alert " $0 "\t" $0}' "$S/ALERT"
-  awk -F: '/^PROBLEM/ && !/^PROBLEM +alerts:/ {k=$1; sub(/^PROBLEM +/, "", k); print "doctor " k "\t" $0}' "$S/alert-doctor.out"
+  awk -F: '(/^PROBLEM/ && !/^PROBLEM +alerts:/) || /^WARN +hourly slots:/ {k=$1; sub(/^(PROBLEM|WARN) +/, "", k); print "doctor " k "\t" $0}' "$S/alert-doctor.out"
 } > "$S/alert-current.tsv"
 touch "$S/alert-reported"
 awk -F'\t' 'FILENAME==ARGV[1] {cur[$1]=1; next} $0 in cur' "$S/alert-current.tsv" "$S/alert-reported" > "$S/alert-reported.new"
