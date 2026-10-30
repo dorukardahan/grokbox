@@ -2,6 +2,9 @@
 
 [![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![repo](https://img.shields.io/badge/github-dorukardahan%2Fgrokbox-black.svg)](https://github.com/dorukardahan/grokbox)
 
+**For:** Grok Bot owners who want encrypted, restorable backups of their bot's box. Made for a Grok Bot box; the core also runs on any Linux machine.  
+**Cost:** free software (restic, rclone, Google Drive API), stored in your own Drive (the free 15 GB works with `BACKUP_PROFILE=lean`). The helper bots' routines use normal Grok Bot usage.
+
 Time-Machine-style, **encrypted** backups of a Grok Bot's persistent Linux box (`/workspace`, `/home/box`) to
 **your own Google Drive**, with [restic](https://restic.net) + [rclone](https://rclone.org). No root, no cron daemon,
 no server run by anyone else.
@@ -9,11 +12,13 @@ no server run by anyone else.
 ```bash
 git clone https://github.com/dorukardahan/grokbox /workspace/grokbox
 ```
-**Using a Grok Bot?** Paste the repo link to it: [AGENTS.md](AGENTS.md) tells it exactly what to do and which three
-steps need you (Google Cloud OAuth client, one consent click, saving the restic password), plus a few choices it asks
-you about (time zone, whether credentials go into the backup, where alerts are sent).
 
-Inspired by the community restic setup idea.
+**Using a Grok Bot?** Paste it the repo link. [AGENTS.md](AGENTS.md) tells it what to do. Only three things need you, once:
+1. Save the restic password it gives you in two places (the key to every backup).
+2. Create a free Google OAuth client, about 10 minutes ([step by step](docs/google-cloud-setup.md)).
+3. Click one Google consent link.
+
+It also asks a few quick choices: time zone, whether credentials go into the backup, and where alerts are sent.
 
 > **Status & disclaimer**
 > - A community project, maintained best-effort. Provided **as is** under the MIT license, with no warranty.
