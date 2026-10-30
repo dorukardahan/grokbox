@@ -113,6 +113,8 @@ done
 step "install (binaries, password file from env)"
 run_ok "install.sh" "$REPO_DIR/install.sh"
 cp "$TMP/last.out" "$TMP/install.out"
+run_ok "install.sh --help" "$REPO_DIR/install.sh" --help
+check "install.sh --help prints only the usage comment, no code" not grep -q "^[^#]" "$TMP/last.out"
 check "restic + rclone present" test -x "$BIN/restic" -a -x "$BIN/rclone"
 check "password file is chmod 600" test "$(stat -c %a "$PASSF")" = 600
 check "password never printed" not grep -qF "$RESTIC_BACKUP_PASSWORD" "$TMP/install.out"

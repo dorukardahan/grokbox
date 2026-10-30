@@ -54,6 +54,7 @@ is the only supported version.
   scheduled prompt. The handoff line is unchanged. `tests/ci-install.sh` checks the numbering.
 
 ### Fixed
+- `install.sh --help` no longer prints two lines of code after the usage text.
 - `doctor.sh` no longer shows `OK quota/disk: Drive ?% used` when the Drive quota could not be read. For an
   `rclone:` repository it now warns, because a full Drive would otherwise go unnoticed.
 - A backup no longer trips over its own restic lock: when the backup's restic process has exited but its lock is still

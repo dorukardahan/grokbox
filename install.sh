@@ -18,7 +18,7 @@ INIT=0; SCHED=0; RESTART=0; GEN=0; SHOW=0; STOP=0; FORCE_RESTART=0
 for a in "$@"; do case "$a" in
   --force) FORCE_RESTART=1;; --init) INIT=1;; --schedule) SCHED=1;; --restart-scheduler) RESTART=1; SCHED=1;;
   --gen-password) GEN=1;; --show-password) SHOW=1;; --stop-scheduler) STOP=1;;
-  -h|--help) sed -n 2,17p "$0"; exit 0;;
+  -h|--help) sed -n 2,15p "$0"; exit 0;;
   *) echo "unknown arg $a"; exit 2;; esac; done
 if [[ $FORCE_RESTART == 1 ]]; then
   [[ $RESTART == 1 && $STOP == 0 && $INIT == 0 ]] || { echo "--force requires --restart-scheduler only"; exit 2; }
