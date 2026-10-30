@@ -964,6 +964,24 @@ check "ALERT_CHECK_MAX_HOURS=48: 27 h is fine" all test "$rc" = 0 --and-- grep -
 rm -f "$D/alert-reported"
 rc=0; GB_CONFIG="$dc" "$REPO_DIR/doctor.sh" >"$TMP/doc.out" 2>&1 || rc=$?
 check "no state/alert-reported (routine not set up): no alert check row, nothing new to warn about" all test "$rc" = 0 --and-- not grep -q 'alert check' "$TMP/doc.out"
+touch "$D/alert-reported"
+rc=0; GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" >"$TMP/chat-doc.out" 2>&1 || rc=$?
+check "no ntfy/webhook/hook but Main's alert check ran just now: alert channel row OK, exit 0, no NO ALERT CHANNEL" all test "$rc" = 0 --and-- grep -q "^OK *alert channel: Grok Bot chat (GrokBox-Main's hourly alert check ran [0-9]* min ago)" "$TMP/chat-doc.out" --and-- not grep -q 'NO ALERT CHANNEL' "$TMP/chat-doc.out"
+GB_CONFIG="$dcwarn" "$REPO_DIR/status.sh" --local >"$TMP/chat-status.out" 2>&1
+check "status: the same fresh alert check means no NO ALERT CHANNEL line and Overall OK" all not grep -q 'NO ALERT CHANNEL' "$TMP/chat-status.out" --and-- grep -qx 'Overall: OK' "$TMP/chat-status.out"
+touch -d '27 hours ago' "$D/alert-reported"
+rc=0; GB_CONFIG="$dcwarn" "$REPO_DIR/doctor.sh" >"$TMP/chat-doc.out" 2>&1 || rc=$?
+check "Main's alert check stale (27 h): the missing channel warns again, next to the stale alert check row" all test "$rc" = 1 --and-- grep -q '^WARN *alert channel: NO ALERT CHANNEL:' "$TMP/chat-doc.out" --and-- grep -q '^WARN *alert check: ' "$TMP/chat-doc.out"
+GB_CONFIG="$dcwarn" "$REPO_DIR/status.sh" --local >"$TMP/chat-status.out" 2>&1
+check "status: a stale alert check does not count as a channel" all grep -q '^!! NO ALERT CHANNEL configured' "$TMP/chat-status.out" --and-- grep -qx 'Overall: ATTENTION NEEDED' "$TMP/chat-status.out"
+dcmax2=$(mkcfg doc-chat-max "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1' 'ALERT_CHECK_MAX_HOURS=48')
+rc=0; GB_CONFIG="$dcmax2" "$REPO_DIR/doctor.sh" >"$TMP/chat-doc.out" 2>&1 || rc=$?
+check "ALERT_CHECK_MAX_HOURS=48: a 27 h old alert check still counts as the channel" all test "$rc" = 0 --and-- grep -q '^OK *alert channel: Grok Bot chat' "$TMP/chat-doc.out"
+touch "$D/alert-reported"
+dcboth=$(mkcfg doc-chat-and-ntfy "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1' 'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"')
+rc=0; GB_CONFIG="$dcboth" "$REPO_DIR/doctor.sh" >"$TMP/chat-doc.out" 2>&1 || rc=$?
+check "ntfy configured and the alert check fresh: the configured-channel row still wins" all test "$rc" = 0 --and-- grep -q '^OK *alert channel: configured (ntfy)' "$TMP/chat-doc.out"
+rm -f "$D/alert-reported"
 dcchan=$(mkcfg doc-channel "GB_STATE=$D" 'EXPECTED_BOTS_REQUIRED=0' 'ALERT_CHANNEL_REQUIRED=1' \
   'ALERT_NTFY_URL="https://alerts.example.invalid/topic-secret-abc"' \
   'ALERT_WEBHOOK_URL="https://alerts.example.invalid/webhook-secret-abc"')

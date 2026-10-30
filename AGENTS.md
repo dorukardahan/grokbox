@@ -92,7 +92,7 @@ If the dry run or backup exits with 4, the stale guard tripped: see rule 3. On e
 ### 7. Start the scheduler
 ```bash
 ./install.sh --schedule             # starts scheduler.sh (idempotent: no-op if running)
-./status.sh                         # expect "Overall: OK" once the first snapshot exists (before step 9/10 the only problem it may show is the "NO ALERT CHANNEL" line: expected, ignore it)
+./status.sh                         # expect "Overall: OK" once the first snapshot exists (until step 10 sets up GrokBox-Main's alert check, the only problem it may show is the "NO ALERT CHANNEL" line: expected, ignore it)
 ```
 The scheduler is a background process: it **dies on a box move** (and with it all backups). That is what step 10 fixes.
 
@@ -112,8 +112,9 @@ Alerts always go to `state/ALERT` + `logs/alerts.log`. After step 10, GrokBox-Ma
 owner in GrokBox-Main's chat about each new problem, so a Grok Bot owner needs nothing more. Ask the owner whether they
 also want an extra channel (e-mail, chat webhook, push service...) - never pick one for them. If they do, set
 `ALERT_HOOK`, `ALERT_WEBHOOK_URL` or `ALERT_NTFY_URL` in `config.env`; `ALERT_HOOK` is a command that receives the alert text on
-stdin. Examples and details: `docs/health-and-alerts.md`. If the owner wants no extra channel, leave them empty and set
-`ALERT_CHANNEL_REQUIRED=0` once step 10 is done, because doctor cannot see the chat channel.
+stdin. Examples and details: `docs/health-and-alerts.md`. If the owner wants no extra channel, leave them empty: once
+step 10 is done and the alert check has run, doctor counts it as the channel (row `alert channel` shows OK). Set
+`ALERT_CHANNEL_REQUIRED=0` only for a box that deliberately has no alerting at all.
 
 ### 10. Create the two Grok Box bots: GrokBox-Main and GrokBox-Assist (do this yourself)
 A box backup alone misses what lives only on the Grok Bot servers: every bot's full conversation history
